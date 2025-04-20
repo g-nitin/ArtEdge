@@ -14,135 +14,262 @@ class StyleTransferService: ObservableObject {
     @Published var isProcessing: Bool = false  // Track processing state
 
     private var mlModel: MLModel?
-    private var outputFeatureName: String?
-    private var contentImageInputName: String?
-    private var styleImageInputName: String?
+    // Store the dynamically determined names
+    private var determinedContentInputName: String?
+    private var determinedStyleInputName: String?
+    private var determinedOutputName: String?
 
     private let processingQueue = DispatchQueue(
         label: "com.artedge.processingQueue", qos: .userInitiated)
 
-    // Use the exact size expected by the model
+    // Enum to represent the expected input type
+    enum ModelInputType {
+        case unknown
+        case multiArray
+        case image  // Represents CVPixelBuffer
+    }
+
+    private var expectedInputType: ModelInputType = .unknown
+
+    // TODO: Target size might ALSO need to be dynamic if models expect different input dimensions.
+    // For now, we'll assume 224x224, but this is a potential future enhancement.
+    // We could inspect the input MLFeatureDescription's imageConstraint or multiArrayConstraint.
     private let targetSize = CGSize(width: 224, height: 224)
 
-    private var styleMultiArray: MLMultiArray?  // Hold the preprocessed style image as MLMultiArray
+    private var styleMultiArray: MLMultiArray?  // Keep for models needing MLMultiArray
+    private var stylePixelBuffer: CVPixelBuffer?  // Add for models needing CVPixelBuffer
     private var currentStyleName: String?
 
-    // Initialize without loading a default style immediately, or load a default one
-    init(modelName: String = "AesFA") {  // Default model name
-        loadModel(named: modelName)
+    // Initialize without loading a default model immediately, or load a default one passed from outside
+    init(modelName: String? = nil) {  // Allow optional initial model name
+        if let initialModel = modelName {
+            print("Initializing StyleTransferService with model: \(initialModel)")
+            // Use a background thread for initial load to avoid blocking UI thread if complex
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.loadModel(named: initialModel)
+            }
+        } else {
+            print("Initializing StyleTransferService without an initial model.")
+            // isModelLoaded will remain false until loadModel or switchModel is called
+        }
     }
 
     private func loadModel(named modelName: String) {
+        // Make sure we are on a background thread potentially? Or ensure caller handles it.
+        // For simplicity, let's assume it's called appropriately.
+        print("Attempting to load model: \(modelName)")
         guard let modelURL = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc")
         else {
             print(
-                "🔴 Error: Could not find compiled model '\(modelName).mlmodelc'. Ensure it's added to the Xcode project target."
+                "🔴 Error: Could not find compiled model '\(modelName).mlmodelc'. Ensure it's added to the Xcode project target and the name is correct."
             )
             DispatchQueue.main.async {
-                self.error = StyleTransferError.modelNotFound
+                self.error = StyleTransferError.modelFileNotFound(modelName)  // More specific error
                 self.isModelLoaded = false
+                self.clearModelData()  // Helper to clear internal state
             }
             return
         }
 
         do {
-            // Load MLModel directly
-            // Use configuration to potentially force CPU for debugging
             let config = MLModelConfiguration()
-            // config.computeUnits = .cpuOnly // Uncomment to force CPU for debugging GPU/ANE issues
+            // config.computeUnits = .all // Default: Use Neural Engine if available
+            // config.computeUnits = .cpuAndGPU // Alternative
+            // config.computeUnits = .cpuOnly // For debugging
 
-            let loadedModel = try MLModel(contentsOf: modelURL, configuration: config)  // Load into a temporary variable
-            self.mlModel = loadedModel  // Assign to the class property
-            print("🟢 Successfully loaded model: \(modelName)")
+            let loadedModel = try MLModel(contentsOf: modelURL, configuration: config)
+            let description = loadedModel.modelDescription
+            print("🟢 Successfully loaded model: \(modelName). Inspecting description...")
 
-            // Directly use the names confirmed during conversion and seen in logs
-            // These names come from the ct.TensorType(name=...) in convert_direct.py
-            let expectedContentInputName = "content_image"
-            let expectedStyleInputName = "style_image"
+            // --- Dynamic Input Name & Type Determination ---
+            var foundContentName: String? = nil
+            var foundStyleName: String? = nil
+            var detectedInputType: ModelInputType = .unknown  // Local variable for detection
 
-            // Verify the names exist in the model description
-            guard
-                loadedModel.modelDescription.inputDescriptionsByName[expectedContentInputName]
-                    != nil
+            let multiArrayInputs = description.inputDescriptionsByName.filter {
+                $1.type == .multiArray
+            }
+            let imageInputs = description.inputDescriptionsByName.filter { $1.type == .image }
+
+            print("ℹ️ Found \(multiArrayInputs.count) MLMultiArray inputs: \(multiArrayInputs.keys)")
+            print("ℹ️ Found \(imageInputs.count) Image (CVPixelBuffer) inputs: \(imageInputs.keys)")
+
+            // --- Check for MLMultiArray Inputs First (Current Pipeline Preference) ---
+            if multiArrayInputs.count == 2 {
+                detectedInputType = .multiArray
+                print("✅ Detected requirement for MLMultiArray inputs.")
+                // Try specific names first
+                if let contentDesc = multiArrayInputs["content_image"] {
+                    foundContentName = contentDesc.name
+                }
+                if let styleDesc = multiArrayInputs["style_image"] {
+                    foundStyleName = styleDesc.name
+                }
+
+                // If specific names not found, infer based on sorted order
+                if foundContentName == nil || foundStyleName == nil {
+                    print(
+                        "⚠️ Specific MLMultiArray names ('content_image', 'style_image') not found. Inferring based on order."
+                    )
+                    let sortedNames = multiArrayInputs.keys.sorted()
+                    foundContentName = sortedNames[0]
+                    foundStyleName = sortedNames[1]
+                    print(
+                        "⚠️ Inferred MLMultiArray inputs: Content='\(foundContentName!)', Style='\(foundStyleName!)'. Verify."
+                    )
+                }
+            }
+            // --- Else, Check for Image (CVPixelBuffer) Inputs ---
+            else if imageInputs.count == 2 {
+                detectedInputType = .image
+                print("✅ Detected requirement for Image (CVPixelBuffer) inputs.")
+                // Try specific names first (allow different names like 'content', 'style')
+                if let contentDesc = imageInputs["content"] {
+                    foundContentName = contentDesc.name
+                }  // Common alternative name
+                else if let contentDesc = imageInputs["content_image"] {
+                    foundContentName = contentDesc.name
+                }
+
+                if let styleDesc = imageInputs["style"] {
+                    foundStyleName = styleDesc.name
+                }  // Common alternative name
+                else if let styleDesc = imageInputs["style_image"] {
+                    foundStyleName = styleDesc.name
+                }
+
+                // If specific names not found, infer based on sorted order
+                if foundContentName == nil || foundStyleName == nil {
+                    print(
+                        "⚠️ Specific Image names ('content'/'content_image', 'style'/'style_image') not found. Inferring based on order."
+                    )
+                    let sortedNames = imageInputs.keys.sorted()
+                    // Be careful with inference - maybe 'content' should come first?
+                    // Let's assume alphabetical for now, but this might need adjustment based on models.
+                    foundContentName = sortedNames[0]
+                    foundStyleName = sortedNames[1]
+                    print(
+                        "⚠️ Inferred Image inputs: Content='\(foundContentName!)', Style='\(foundStyleName!)'. Verify."
+                    )
+                }
+            }
+            // --- Else, Input configuration is unexpected ---
             else {
                 print(
-                    "🔴 Error: Model description does not contain expected input name '\(expectedContentInputName)'"
+                    "🔴 Error: Unexpected input configuration. Expected 2 MLMultiArray inputs OR 2 Image inputs."
+                )
+                print(
+                    "🔴 Found \(multiArrayInputs.count) MLMultiArray and \(imageInputs.count) Image inputs."
                 )
                 DispatchQueue.main.async {
-                    self.error = StyleTransferError.inputNameNotDetermined
+                    self.error = StyleTransferError.inputMismatch(
+                        "Expected 2 MLMultiArray OR 2 Image inputs. Found M:\(multiArrayInputs.count), I:\(imageInputs.count)"
+                    )
                     self.isModelLoaded = false
+                    self.clearModelData()
                 }
                 return
             }
-            guard
-                loadedModel.modelDescription.inputDescriptionsByName[expectedStyleInputName] != nil
+
+            // Ensure both names were found
+            guard let finalContentName = foundContentName, let finalStyleName = foundStyleName
             else {
                 print(
-                    "🔴 Error: Model description does not contain expected input name '\(expectedStyleInputName)'"
+                    "🔴 Error: Failed to assign both content and style input names for detected type \(detectedInputType)."
                 )
                 DispatchQueue.main.async {
-                    self.error = StyleTransferError.inputNameNotDetermined
+                    self.error = StyleTransferError.inputNameNotDetermined(
+                        "Could not resolve both input names for type \(detectedInputType)")
                     self.isModelLoaded = false
+                    self.clearModelData()
                 }
                 return
             }
 
-            // Assign the confirmed names
-            self.contentImageInputName = expectedContentInputName
-            self.styleImageInputName = expectedStyleInputName
-            print("ℹ️ Using content input name: \(self.contentImageInputName!)")
-            print("ℹ️ Using style input name: \(self.styleImageInputName!)")
+            print("ℹ️ Using Content Input: '\(finalContentName)' (Type: \(detectedInputType))")
+            print("ℹ️ Using Style Input: '\(finalStyleName)' (Type: \(detectedInputType))")
 
-            // Determine Output Feature Name (Keep existing logic)
-            let multiArrayOutputs = loadedModel.modelDescription.outputDescriptionsByName.values
-                .filter { $0.type == .multiArray }
+            // --- Dynamic Output Name Determination (Keep as is, assuming MLMultiArray output) ---
+            let multiArrayOutputs = description.outputDescriptionsByName.filter {
+                $1.type == .multiArray
+            }
+            print(
+                "ℹ️ Found \(multiArrayOutputs.count) MLMultiArray outputs: \(multiArrayOutputs.keys)"
+            )
 
+            var foundOutputName: String? = nil
             if multiArrayOutputs.count == 1 {
-                self.outputFeatureName = multiArrayOutputs.first!.name
-                print(
-                    "ℹ️ Automatically determined model output feature name: \(self.outputFeatureName!)"
-                )
-            } else if multiArrayOutputs.count > 1 {
-                // If multiple multiarray outputs, we need a way to identify the correct one.
-                // For now, let's print a warning and maybe pick the first one or require manual setting.
-                print(
-                    "⚠️ Warning: Model has multiple MLMultiArray outputs: \(multiArrayOutputs.map { $0.name }). Using the first one found: \(multiArrayOutputs.first!.name). Verify this is correct."
-                )
-                self.outputFeatureName = multiArrayOutputs.first!.name  // Or handle error / require specific name
+                foundOutputName = multiArrayOutputs.first!.value.name
+                print("ℹ️ Using Output: '\(foundOutputName!)'")
             } else {
-                // Fallback or error if no suitable output found
-                print(
-                    "🔴 Error: Could not find any MLMultiArray output feature for model '\(modelName)'."
-                )
-                self.outputFeatureName = nil  // Ensure it's nil if not found
-                DispatchQueue.main.async {
-                    self.error = StyleTransferError.outputNameNotDetermined
-                    self.isModelLoaded = false  // Mark as not fully loaded/usable
-                    self.mlModel = nil
+                // If the model outputs an Image instead, adapt this section too
+                let imageOutputs = description.outputDescriptionsByName.filter { $1.type == .image }
+                if imageOutputs.count == 1 && multiArrayOutputs.isEmpty {
+                    // TODO: Handle Image output - requires different post-processing
+                    print(
+                        "🔴 Error: Model outputs an Image (CVPixelBuffer), but post-processing expects MLMultiArray. Output handling adaptation needed."
+                    )
+                    DispatchQueue.main.async {
+                        self.error = StyleTransferError.outputTypeMismatch(
+                            "Expected MLMultiArray output, found Image output.")
+                        self.isModelLoaded = false
+                        self.clearModelData()
+                    }
+                    return
+                } else {
+                    print(
+                        "🔴 Error: Expected exactly 1 MLMultiArray output, but found \(multiArrayOutputs.count) (and \(imageOutputs.count) Image outputs)."
+                    )
+                    DispatchQueue.main.async {
+                        self.error = StyleTransferError.outputNameNotDetermined(
+                            "Expected 1 MLMultiArray output, found \(multiArrayOutputs.count)")
+                        self.isModelLoaded = false
+                        self.clearModelData()
+                    }
+                    return
                 }
-                return  // Stop further processing if output name is crucial and not found
             }
 
+            // --- Success: Assign properties ---
             DispatchQueue.main.async {
+                self.mlModel = loadedModel
+                self.determinedContentInputName = finalContentName
+                self.determinedStyleInputName = finalStyleName
+                self.determinedOutputName = foundOutputName
+                self.expectedInputType = detectedInputType  // Store the detected type
                 self.isModelLoaded = true
-                self.error = nil  // Clear previous errors
+                self.error = nil
+                print("✅ Model '\(modelName)' is ready. Expecting \(detectedInputType) inputs.")
             }
+
         } catch {
-            print("🔴 Error loading Core ML model: \(error)")
+            // ... (error handling remains the same) ...
+            print("🔴 Error loading Core ML model '\(modelName)': \(error)")
             DispatchQueue.main.async {
                 self.error = error
                 self.isModelLoaded = false
-                self.mlModel = nil
-                self.outputFeatureName = nil  // Clear output name on error too
+                self.clearModelData()
             }
         }
     }
 
+    // Helper to clear model-specific data
+    private func clearModelData() {
+        self.mlModel = nil
+        self.determinedContentInputName = nil
+        self.determinedStyleInputName = nil
+        self.determinedOutputName = nil
+        self.expectedInputType = .unknown  // Reset expected type
+        // Decide whether to clear the style image too, as it might be incompatible
+        // self.styleMultiArray = nil
+        // self.currentStyleName = nil
+    }
+
     // Load and Preprocess Style Image - Called when user selects a style
     func loadStyleImage(named imageName: String) {
-        // Avoid reloading the same style unnecessarily
         guard imageName != currentStyleName else {
             print("ℹ️ Style '\(imageName)' is already loaded.")
+            // Ensure error state is consistent if style was previously missing
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 if let currentError = self.error as? StyleTransferError,
@@ -159,79 +286,111 @@ class StyleTransferService: ObservableObject {
             print("🔴 Error: Could not load style image named '\(imageName)'.")
             DispatchQueue.main.async { [weak self] in
                 self?.error = StyleTransferError.styleImageNotFound
-                self?.styleMultiArray = nil // Clear multi-array
+                self?.styleMultiArray = nil
+                self?.stylePixelBuffer = nil  // Clear pixel buffer too
                 self?.currentStyleName = nil
             }
             return
         }
 
-        // 1. Preprocess to CVPixelBuffer (intermediate step)
-        guard let buffer = preprocessImagePyTorchStyle(image: uiImage, targetSize: Int(targetSize.width)) else {
+        // 1. Preprocess to CVPixelBuffer (This is the common step)
+        // Use the *same* preprocessing as the content image for consistency
+        guard
+            let buffer = preprocessImagePyTorchStyle(
+                image: uiImage, targetSize: Int(targetSize.width))
+        else {
             print("🔴 Error: Failed to preprocess style image '\(imageName)' to CVPixelBuffer.")
             DispatchQueue.main.async { [weak self] in
                 self?.error = StyleTransferError.styleImageProcessingFailed
-                self?.styleMultiArray = nil // Clear multi-array
+                self?.styleMultiArray = nil
+                self?.stylePixelBuffer = nil  // Clear pixel buffer too
                 self?.currentStyleName = nil
             }
             return
         }
 
-        // 2. Convert CVPixelBuffer to MLMultiArray
+        // Store the CVPixelBuffer
+        self.stylePixelBuffer = buffer
+        print("🟢 Style image '\(imageName)' preprocessed to CVPixelBuffer.")
+
+        // 2. Convert CVPixelBuffer to MLMultiArray (for models that need it)
+        // This conversion includes normalization.
         guard let multiArray = mlMultiArray(from: buffer) else {
             print("🔴 Error: Failed to convert style CVPixelBuffer to MLMultiArray.")
-             DispatchQueue.main.async { [weak self] in
-                self?.error = StyleTransferError.styleImageProcessingFailed // Or a new specific error
-                self?.styleMultiArray = nil // Clear multi-array
-                self?.currentStyleName = nil
+            DispatchQueue.main.async { [weak self] in
+                // This might be acceptable if no models need MLMultiArray, but log it.
+                // Consider if this should be a fatal error for style loading.
+                // For now, let's allow loading to succeed if buffer is okay, but log error.
+                print(
+                    "⚠️ Warning: Could not create MLMultiArray for style. Models needing MLMultiArray input will fail."
+                )
+                // self?.error = StyleTransferError.styleImageProcessingFailed
+                self?.styleMultiArray = nil  // Ensure it's nil
+                // Don't clear currentStyleName or pixelBuffer here if buffer is valid
             }
+            // Continue even if multi-array fails, as pixel buffer might be usable
             return
         }
 
-        // Store the MLMultiArray
-        self.styleMultiArray = multiArray
+        // Store the MLMultiArray (if conversion succeeded)
+        if multiArray != nil {
+            self.styleMultiArray = multiArray
+            print("🟢 Style CVPixelBuffer also converted to MLMultiArray.")
+        }
+
+        // Update state
         self.currentStyleName = imageName
-        print("🟢 Style image '\(imageName)' loaded and preprocessed to MLMultiArray.")
         DispatchQueue.main.async { [weak self] in
-            self?.error = nil
+            // Clear error only if it was styleImageNotSet previously
+            if let currentError = self?.error as? StyleTransferError,
+                currentError == .styleImageNotSet
+            {
+                self?.error = nil
+            }
         }
     }
 
-
     func process(contentImage: UIImage) {
-        guard let model = mlModel, isModelLoaded else {
-            print("🔴 Model not loaded.")
-            DispatchQueue.main.async {
-                self.error = StyleTransferError.modelNotLoaded
-                self.isProcessing = false
-            }
-            return
-        }
-        // Check for the style MLMultiArray now
-        guard let styleInputArray = styleMultiArray else {
-            print("🔴 Style image not loaded or processed to MLMultiArray.")
-            DispatchQueue.main.async {
-                self.error = StyleTransferError.styleImageNotSet
-                self.isProcessing = false
-            }
-            return
-        }
-
-        guard let outputName = self.outputFeatureName else {
-            print("🔴 Error: Output feature name was not determined during model loading.")
-            DispatchQueue.main.async {
-                self.error = StyleTransferError.outputNameNotDetermined
-                self.isProcessing = false
-            }
-            return
-        }
-
-        // Check that we have input feature names
-        guard let contentInputName = self.contentImageInputName,
-            let styleInputName = self.styleImageInputName
+        guard let model = mlModel, isModelLoaded,
+            let contentInputName = self.determinedContentInputName,
+            let styleInputName = self.determinedStyleInputName,
+            let outputName = self.determinedOutputName,
+            expectedInputType != .unknown  // Ensure type was determined
         else {
-            print("🔴 Error: Input feature names were not determined during model loading.")
+            print("🔴 Error: Model not loaded or input/output names/type not determined.")
             DispatchQueue.main.async {
-                self.error = StyleTransferError.inputNameNotDetermined
+                // Provide more specific error
+                if !self.isModelLoaded {
+                    self.error = StyleTransferError.modelNotLoaded
+                } else if self.expectedInputType == .unknown {
+                    self.error = StyleTransferError.inputMismatch(
+                        "Input type could not be determined during load.")
+                } else {
+                    self.error = StyleTransferError.modelNotLoaded
+                }  // Fallback
+                self.isProcessing = false
+            }
+            return
+        }
+
+        // --- Style Input Handling ---
+        // Style image is ALWAYS preprocessed to MLMultiArray currently via loadStyleImage.
+        // If a model needs CVPixelBuffer for style, loadStyleImage needs adaptation too.
+        // For now, assume style is MLMultiArray OR we adapt loadStyleImage later.
+        // Let's assume for THIS specific AdaIn model, style is ALSO CVPixelBuffer.
+        // We need to preprocess the style image to CVPixelBuffer ON DEMAND here,
+        // OR change loadStyleImage to store the CVPixelBuffer instead of MLMultiArray.
+        // Let's modify loadStyleImage slightly first.
+
+        // --- Content Input Handling ---
+        // Preprocess content image to CVPixelBuffer (needed for both paths)
+        guard
+            let contentPixelBuffer = self.preprocessImagePyTorchStyle(
+                image: contentImage, targetSize: Int(self.targetSize.width))
+        else {
+            print("🔴 Failed to preprocess content UIImage to CVPixelBuffer.")
+            DispatchQueue.main.async {
+                self.error = StyleTransferError.inputResizeFailed
                 self.isProcessing = false
             }
             return
@@ -241,7 +400,7 @@ class StyleTransferService: ObservableObject {
         DispatchQueue.main.async {
             self.isProcessing = true
             self.styledImage = nil
-            self.error = nil
+            self.error = nil  // Clear previous errors before starting
         }
 
         let startTime = Date()
@@ -249,36 +408,74 @@ class StyleTransferService: ObservableObject {
         processingQueue.async { [weak self] in
             guard let self = self else { return }
 
-            // 1. Preprocess content image to CVPixelBuffer
-            guard let contentPixelBuffer = self.preprocessImagePyTorchStyle(
-                image: contentImage, targetSize: Int(self.targetSize.width))
-            else {
-                print("🔴 Failed to preprocess content UIImage to CVPixelBuffer.")
-                DispatchQueue.main.async {
-                    self.error = StyleTransferError.inputResizeFailed
-                    self.isProcessing = false
+            // --- Create Input Provider based on Expected Type ---
+            var inputFeatures: [String: Any] = [:]
+            var inputProviderCreationFailed = false
+
+            switch self.expectedInputType {
+            case .multiArray:
+                // Convert content CVPixelBuffer to MLMultiArray
+                guard let contentInputArray = self.mlMultiArray(from: contentPixelBuffer) else {
+                    print("🔴 Failed to convert content CVPixelBuffer to MLMultiArray.")
+                    DispatchQueue.main.async {
+                        self.error = StyleTransferError.inputConversionFailed
+                        self.isProcessing = false
+                    }
+                    return  // Exit async block
                 }
-                return
+                // Get pre-converted style MLMultiArray
+                guard let styleInputArray = self.styleMultiArray else {
+                    print("🔴 Style MLMultiArray not available.")
+                    DispatchQueue.main.async {
+                        self.error = StyleTransferError.styleImageNotSet  // Or a different error
+                        self.isProcessing = false
+                    }
+                    return  // Exit async block
+                }
+                inputFeatures[contentInputName] = contentInputArray
+                inputFeatures[styleInputName] = styleInputArray
+                print("ℹ️ Providing MLMultiArray inputs to model.")
+
+            case .image:
+                // Use CVPixelBuffer directly for content
+                inputFeatures[contentInputName] = contentPixelBuffer
+
+                // --- Style Input for Image type ---
+                // We need the style image as CVPixelBuffer too.
+                // Let's retrieve/create it here. Requires stylePixelBuffer property.
+                guard let styleBuffer = self.stylePixelBuffer else {  // Assumes stylePixelBuffer exists
+                    print("🔴 Style CVPixelBuffer not available.")
+                    DispatchQueue.main.async {
+                        self.error = StyleTransferError.styleImageNotSet  // Or a different error
+                        self.isProcessing = false
+                    }
+                    return  // Exit async block
+                }
+                inputFeatures[styleInputName] = styleBuffer
+                print("ℹ️ Providing CVPixelBuffer inputs to model.")
+
+            case .unknown:
+                // Should have been caught by the initial guard, but handle defensively
+                print("🔴 Error: Expected input type is unknown during processing.")
+                inputProviderCreationFailed = true  // Mark failure
             }
 
-            // 2. Convert content CVPixelBuffer to MLMultiArray
-            guard let contentInputArray = self.mlMultiArray(from: contentPixelBuffer) else {
-                 print("🔴 Failed to convert content CVPixelBuffer to MLMultiArray.")
-                 DispatchQueue.main.async {
-                     self.error = StyleTransferError.inputResizeFailed // Or a new specific error
-                     self.isProcessing = false
-                 }
-                 return
-             }
+            // Check if input preparation failed
+            guard !inputProviderCreationFailed else {
+                DispatchQueue.main.async {
+                    if self.error == nil {  // Set error if not already set
+                        self.error = StyleTransferError.inputProviderCreationFailed
+                    }
+                    self.isProcessing = false
+                }
+                return  // Exit async block
+            }
 
-            // 3. Create MLFeatureProvider using MLMultiArrays
-            guard let inputProvider = try? MLDictionaryFeatureProvider(
-                dictionary: [
-                    contentInputName: contentInputArray, // Use MLMultiArray
-                    styleInputName: styleInputArray,     // Use MLMultiArray
-                ]
-            ) else {
-                print("🔴 Failed to create input provider with MLMultiArrays. Check input names ('\(contentInputName)', '\(styleInputName)').")
+            // Create the actual feature provider
+            guard let inputProvider = try? MLDictionaryFeatureProvider(dictionary: inputFeatures)
+            else {
+                print(
+                    "🔴 Failed to create MLDictionaryFeatureProvider. Check input names and types.")
                 DispatchQueue.main.async {
                     self.error = StyleTransferError.inputProviderCreationFailed
                     self.isProcessing = false
@@ -286,30 +483,44 @@ class StyleTransferService: ObservableObject {
                 return
             }
 
-            // 4. Perform Prediction
+            // --- Perform Prediction (Remains the same, assuming MLMultiArray output) ---
             do {
                 let prediction = try model.prediction(from: inputProvider)
-                // 5. Extract Output using the determined name
+
+                // Extract Output (Still assuming MLMultiArray output)
                 guard
                     let multiArrayOutput = prediction.featureValue(for: outputName)?.multiArrayValue
                 else {
                     print(
-                        "🔴 Failed to get MLMultiArray output using determined name '\(outputName)'. Check model output."
+                        "🔴 Failed to get MLMultiArray output using determined name '\(outputName)'."
                     )
-                    DispatchQueue.main.async {
-                        self.error = StyleTransferError.unexpectedResultType
-                        self.isProcessing = false
+                    // Check if the output was actually an Image
+                    if let imageOutput = prediction.featureValue(for: outputName)?.imageBufferValue
+                    {
+                        print(
+                            "ℹ️ Model actually outputted an Image (CVPixelBuffer). Post-processing needs update."
+                        )
+                        // TODO: Implement CVPixelBuffer to UIImage conversion here
+                        DispatchQueue.main.async {
+                            self.error = StyleTransferError.outputTypeMismatch(
+                                "Expected MLMultiArray output, got Image.")
+                            self.isProcessing = false
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            self.error = StyleTransferError.unexpectedResultType
+                            self.isProcessing = false
+                        }
                     }
                     return
                 }
 
-                // 6. Convert MLMultiArray to Image (with added logging)
+                // Convert MLMultiArray output to Image
                 let convertedImage = self.imageFromMultiArray(multiArray: multiArrayOutput)
-
                 let endTime = Date()
-                let timeInterval = endTime.timeIntervalSince(startTime) * 1000  // ms
+                let timeInterval = endTime.timeIntervalSince(startTime) * 1000
 
-                // 7. Update UI on Main Thread
+                // Update UI
                 DispatchQueue.main.async {
                     if let img = convertedImage {
                         self.styledImage = Image(uiImage: img)
@@ -320,7 +531,7 @@ class StyleTransferService: ObservableObject {
                         self.error = StyleTransferError.multiArrayConversionFailed
                     }
                     self.processingTime = timeInterval
-                    self.isProcessing = false  // Mark processing finished
+                    self.isProcessing = false
                 }
 
             } catch {
@@ -328,28 +539,32 @@ class StyleTransferService: ObservableObject {
                 DispatchQueue.main.async {
                     self.error = error
                     self.styledImage = nil
-                    self.isProcessing = false  // Mark processing finished on error
+                    self.isProcessing = false
                 }
             }
-        }
-    }
+        }  // End of processingQueue.async
+    }  // End of process function
 
     func switchModel(to modelName: String) {
-        print("🔄 Switching model to: \(modelName)")
-        // Reset state before loading new model
+        print("🔄 Request received to switch model to: \(modelName)")
+        // Reset state before loading the new model
+        // Perform UI updates on the main thread
         DispatchQueue.main.async {
             self.isModelLoaded = false
             self.styledImage = nil
-            self.error = nil
-            self.isProcessing = false  // Cancel any ongoing processing if needed
+            self.error = StyleTransferError.modelLoading  // Indicate loading
+            self.isProcessing = false
+            // self.processingTime = 0.0 // Optional reset
         }
-        // Clear internal state related to the old model
-        self.mlModel = nil
-        self.outputFeatureName = nil
-        self.contentImageInputName = nil
-        self.styleImageInputName = nil
-        // Load the new model (this will update isModelLoaded, error, outputFeatureName)
-        loadModel(named: modelName)
+
+        // Clear internal model-specific properties immediately
+        self.clearModelData()  // Use the helper function
+
+        // Load the new model asynchronously
+        // Wrap loadModel call in a background queue if it's not already async
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.loadModel(named: modelName)
+        }
     }
 
     // Preprocessing Function (Mimics PyTorch Resize(shorter_edge) + CenterCrop)
@@ -775,45 +990,50 @@ class StyleTransferService: ObservableObject {
     }
 
     // Define potential errors
-    enum StyleTransferError: Error, LocalizedError {
-        case modelNotFound
+    enum StyleTransferError: Error, LocalizedError, Equatable {
+        case modelFileNotFound(String)  // Include filename
+        case modelLoading
         case modelNotLoaded
         case styleImageNotFound
         case styleImageProcessingFailed
         case styleImageNotSet
         case inputResizeFailed
+        case inputConversionFailed
         case inputProviderCreationFailed
         case unexpectedResultType
         case multiArrayConversionFailed
         case contentImageLoadFailed
-        case outputNameNotDetermined
-        case inputNameNotDetermined
+        case outputNameNotDetermined(String)  // Include details
+        case inputNameNotDetermined(String)  // Include details
+        case inputMismatch(String)  // For cases where type is wrong (e.g., expected MultiArray, got Image)
+        case outputTypeMismatch(String) // Added for Image output case
 
         var errorDescription: String? {
             switch self {
-            case .modelNotFound:
-                return
-                    "Style transfer model file (\(Bundle.main.bundleIdentifier ?? "App")/*.mlmodelc) not found. Ensure it's added to the target."
+            case .modelFileNotFound(let name):
+                return "Model file '\(name).mlmodelc' not found. Ensure it's added to the target."
+            case .modelLoading:
+                return "Loading selected model..."
             case .modelNotLoaded:
-                return "Style transfer model could not be loaded. Check console logs."
+                return "Style transfer model could not be loaded or is not selected."
             case .styleImageNotFound: return "Style image file not found in assets."
             case .styleImageProcessingFailed: return "Could not resize/convert the style image."
             case .styleImageNotSet: return "Please select a style image first."
-            case .inputResizeFailed:
-                return "Failed to resize/convert content image for model input."
+            case .inputResizeFailed: return "Failed to resize content image for model input."
+            case .inputConversionFailed: return "Failed to convert content image to MLMultiArray."
             case .inputProviderCreationFailed:
-                return "Failed to create input features for the model. Check input names."
+                return "Failed to create input features for the model."
             case .unexpectedResultType:
-                return "Model output was not the expected format (MLMultiArray)."
+                return "Model output was not the expected MLMultiArray format."
             case .multiArrayConversionFailed:
                 return "Could not convert model output tensor to an image."
             case .contentImageLoadFailed: return "Failed to load the selected content image."
-            case .outputNameNotDetermined:
-                return
-                    "Could not determine the required MLMultiArray output name from the loaded model."
-            case .inputNameNotDetermined:
-                return
-                    "Could not determine the required image input names (content/style) from the loaded model."
+            case .outputNameNotDetermined(let details):
+                return "Could not determine model output name. \(details)."
+            case .inputNameNotDetermined(let details):
+                return "Could not determine model input names. \(details)."
+            case .inputMismatch(let details): return "Model input type mismatch. \(details)."
+            case .outputTypeMismatch(let details): return "Model output type mismatch. \(details)."
             }
         }
     }

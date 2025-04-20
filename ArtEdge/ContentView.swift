@@ -2,21 +2,25 @@ import PhotosUI
 import SwiftUI
 
 struct ContentView: View {
-    // Keep StyleTransferService
-    @StateObject private var styleTransferService = StyleTransferService()  // Initialize service
-
     // State for UI elements and selections
     @State private var contentImage: UIImage?
     @State private var selectedPhotoItem: PhotosPickerItem?  // For PhotoPicker selection binding
     @State private var selectedStyle: StyleInfo?
     @State private var resultImage: Image?  // Use SwiftUI Image for display
     @State private var userMessage: String?  // For showing errors or status
-    @State private var selectedModelName: String = "adain_mobilenet_model"  // Default model
+    // List of available model *filenames* (without .mlmodelc extension)
+    // Ensure these files are actually added to your Xcode project target!
+    let availableModels: [String] = ["AdaIn", "AesFA"]  // Add your actual model names here
+    @State private var selectedModelName: String
+
+    // Initialize StyleTransferService with the initial model
+    // Use @StateObject correctly with initial parameter
+    @StateObject private var styleTransferService: StyleTransferService
 
     // Computed property to check if processing can start
     private var canProcess: Bool {
         contentImage != nil && selectedStyle != nil && !styleTransferService.isProcessing
-            && styleTransferService.isModelLoaded
+            && styleTransferService.isModelLoaded  // Check if model is loaded AND ready
     }
 
     let availableStyles: [StyleInfo] = [
@@ -25,6 +29,17 @@ struct ContentView: View {
         StyleInfo(name: "Composition VII", assetName: "composition_vii"),
         StyleInfo(name: "Brushstrokes", assetName: "brushstrokes"),
     ]
+
+    // Custom Initializer for StateObject
+    init() {
+        // Set the initial model name here
+        let initialModelName = "AesFA"
+        _selectedModelName = State(initialValue: initialModelName)
+        // Initialize the StateObject with the initial model name
+        _styleTransferService = StateObject(
+            wrappedValue: StyleTransferService(modelName: initialModelName))
+        print("ContentView init: Initializing with model '\(initialModelName)'")
+    }
 
     var body: some View {
 
@@ -51,6 +66,8 @@ struct ContentView: View {
 
                     ScrollView {
                         VStack(spacing: 15) {  // Original spacing for content sections
+                            modelSelectionSection
+                            Divider()
                             contentImageSection
                             Divider()
                             styleSelectionSection
@@ -77,17 +94,24 @@ struct ContentView: View {
         }
 
         .onChange(of: selectedModelName) { newName in
-            styleTransferService.switchModel(to: newName)
-            // Reset UI state related to previous model's results if necessary
+            print("ContentView: Detected model selection change to '\(newName)'")
+            // Reset UI state related to previous model's results
             resultImage = nil
-            userMessage = "Loading model \(newName)..."
-            // You might also want to clear the selected style or content image depending on UX choices
+            // Optionally clear content/style if models are incompatible
+            // contentImage = nil
+            // selectedStyle = nil
+            // styleTransferService.loadStyleImage(named: "") // Clear style in service?
+
+            // Set loading message immediately
+            userMessage = "Switching to model \(newName)..."
+            // Tell the service to switch
+            styleTransferService.switchModel(to: newName)
         }
-        // Update result image when service publishes it
         .onReceive(styleTransferService.$styledImage) { newStyledImage in
             self.resultImage = newStyledImage
-            if newStyledImage != nil {
-                userMessage = nil  // Clear message on success
+            // Clear processing message only if successful
+            if newStyledImage != nil && userMessage == "Processing..." {
+                userMessage = nil
             }
         }
         // Update user message on error
@@ -102,6 +126,33 @@ struct ContentView: View {
         .onReceive(styleTransferService.$isProcessing) { processing in
             handleProcessingStatus(processing: processing)
         }
+        // Optional: Add onAppear if initial load needs specific handling
+        // .onAppear {
+        //     if !styleTransferService.isModelLoaded && styleTransferService.error == nil {
+        //         // If service was initialized without a model or failed initially
+        //         userMessage = "Loading initial model..."
+        //         // You might trigger loadModel here if not done in init
+        //         // styleTransferService.loadModel(named: selectedModelName)
+        //     }
+        // }
+    }
+
+    private var modelSelectionSection: some View {
+        VStack(alignment: .leading) {  // Align content to the left
+            Text("Select Model").font(.headline)
+                .padding(.horizontal)  // Add padding to match other sections
+
+            Picker("Model", selection: $selectedModelName) {
+                ForEach(availableModels, id: \.self) { modelName in
+                    Text(modelName).tag(modelName)  // Use filename as tag
+                }
+            }
+            .pickerStyle(.segmented)  // Or .menu for a dropdown
+            .padding(.horizontal)  // Add padding to the picker
+            .disabled(styleTransferService.isProcessing)  // Disable while processing
+        }
+        // Add padding below the section if needed
+        // .padding(.bottom, 10)
     }
 
     private var contentImageSection: some View {
@@ -296,24 +347,46 @@ struct ContentView: View {
         }
     }
 
+    // Handle Model Loading Status
+    func handleModelLoadingStatus(loaded: Bool) {
+        // Update message based on loading status, avoid overwriting specific errors
+        if !loaded && styleTransferService.error == nil {
+            // This might briefly show if switching starts before the loading message is set
+            // userMessage = "Loading style transfer model..."
+        } else if loaded {
+            // Check if the current message indicates loading, then clear it
+            if userMessage == "Loading initial model..."
+                || userMessage == "Switching to model \(selectedModelName)..."
+                || userMessage == "Loading selected model..."
+            {
+                userMessage = "Model '\(selectedModelName)' loaded. Ready."
+                // Optionally clear the "Ready" message after a delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    if userMessage == "Model '\(selectedModelName)' loaded. Ready." {
+                        userMessage = nil
+                    }
+                }
+            }
+        }
+        // If loaded is false AND there's an error, handleServiceError will display it.
+    }
+
     // Handle Errors from Service
     func handleServiceError(error: Error?) {
         if let error = error {
-            // Use the localized description from the error enum
-            userMessage = "Error: \(error.localizedDescription)"
-            print("🔴 Service Error: \(error.localizedDescription)")
+            // Don't show the generic "Loading..." message if a real error occurred
+            if let styleError = error as? StyleTransferService.StyleTransferError,
+                styleError == .modelLoading
+            {
+                // Keep the "Loading selected model..." message
+                userMessage = styleError.localizedDescription
+            } else {
+                // Show actual error description
+                userMessage = "Error: \(error.localizedDescription)"
+                print("🔴 Service Error: \(error.localizedDescription)")
+            }
         }
-        // Don't clear message here, let success or new action clear it
-    }
-
-    // Handle Model Loading Status
-    func handleModelLoadingStatus(loaded: Bool) {
-        if !loaded && styleTransferService.error == nil {  // Only show if no other error
-            userMessage = "Loading style transfer model..."
-        } else if loaded && userMessage == "Loading style transfer model..." {
-            userMessage = "Model loaded. Ready."  // Clear loading message
-            // Consider clearing this message after a short delay
-        }
+        // Don't clear message here automatically
     }
 
     // Handle Processing Status Updates
