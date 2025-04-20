@@ -569,93 +569,67 @@ class StyleTransferService: ObservableObject {
 
     // Preprocessing Function (Mimics PyTorch Resize(shorter_edge) + CenterCrop)
     private func preprocessImagePyTorchStyle(image: UIImage, targetSize: Int) -> CVPixelBuffer? {
-        let originalSize = image.size
         // Define target size in PIXELS
-        let targetPixelCGSize = CGSize(width: targetSize, height: targetSize)  // Target pixel size object
+        let targetPixelCGSize = CGSize(width: targetSize, height: targetSize)
+        // Calculate original pixel size for logging
+        let originalPixelWidth = image.size.width * image.scale
+        let originalPixelHeight = image.size.height * image.scale
+        let originalPixelSize = CGSize(width: originalPixelWidth, height: originalPixelHeight)
+
         print(
-            "➡️ Preprocessing: Original size \(originalSize), Target Pixel Size \(targetPixelCGSize)"
+            "➡️ Preprocessing (Revised): Original Pixel Size \(originalPixelSize), Target Pixel Size \(targetPixelCGSize)"
         )
 
-        // 1. Calculate intermediate size (ensure integer dimensions)
-        // This calculation should resize based on the target *pixel* size
-        let intermediateSize: CGSize
-        let scaleFactor: CGFloat  // Use a different name to avoid confusion with UIImage.scale
-        if originalSize.width < originalSize.height {
-            // Width is shorter edge (in points)
-            // Calculate scale needed to make pixel width equal targetSize
-            scaleFactor = CGFloat(targetSize) / (originalSize.width * image.scale)  // Scale based on original pixels
-            // Intermediate size in points
-            intermediateSize = CGSize(
-                width: originalSize.width * scaleFactor, height: originalSize.height * scaleFactor)
-
-        } else {
-            // Height is shorter or equal edge (in points)
-            // Calculate scale needed to make pixel height equal targetSize
-            scaleFactor = CGFloat(targetSize) / (originalSize.height * image.scale)  // Scale based on original pixels
-            // Intermediate size in points
-            intermediateSize = CGSize(
-                width: originalSize.width * scaleFactor, height: originalSize.height * scaleFactor)
-        }
-        // Round the intermediate size for the renderer
-        let roundedIntermediateSize = CGSize(
-            width: round(intermediateSize.width), height: round(intermediateSize.height))
-        print("➡️ Preprocessing: Calculated intermediate size (points) \(roundedIntermediateSize)")
-
-        // 2. Resize to intermediate size (in points)
-        guard let resizedImage = image.resize(to: roundedIntermediateSize) else {
+        // 1. Resize the entire image directly to the target square size (in points)
+        // UIGraphicsImageRenderer handles scale correctly. The resulting UIImage
+        // will have size = targetPixelCGSize (in points) and its underlying CGImage
+        // will have pixel dimensions matching targetPixelCGSize * scale.
+        // The subsequent pixelBufferFromImage will draw this into a buffer
+        // of exactly targetPixelCGSize pixels.
+        guard let resizedImage = image.resize(to: targetPixelCGSize) else {
             print(
-                "🔴 Preprocessing: Failed to resize image to intermediate size \(roundedIntermediateSize)"
+                "🔴 Preprocessing (Revised): Failed to resize image directly to target size \(targetPixelCGSize)"
             )
             return nil
         }
         // Log the size of the resized image (points) and its underlying pixel dimensions
         if let resizedCG = resizedImage.cgImage {
             print(
-                "➡️ Preprocessing: Resized image size \(resizedImage.size) (points), Scale \(resizedImage.scale), Pixels \(resizedCG.width)x\(resizedCG.height)"
+                "➡️ Preprocessing (Revised): Resized image size \(resizedImage.size) (points), Scale \(resizedImage.scale), Pixels \(resizedCG.width)x\(resizedCG.height)"
             )
         } else {
             print(
-                "➡️ Preprocessing: Resized image size \(resizedImage.size) (points), Scale \(resizedImage.scale), Could not get CGImage"
+                "➡️ Preprocessing (Revised): Resized image size \(resizedImage.size) (points), Scale \(resizedImage.scale), Could not get CGImage"
             )
         }
 
-        // 3. Center Crop to target PIXEL size
-        guard let croppedImage = resizedImage.centerCrop(to: targetPixelCGSize) else {  // Pass targetPixelCGSize
-            print(
-                "🔴 Preprocessing: Failed to center crop image to target pixel size \(targetPixelCGSize)"
-            )
-            return nil
-        }
-        // Log the size immediately after cropping (should be 224x224 due to scale: 1.0)
-        print("➡️ Preprocessing: Cropped image size \(croppedImage.size)")
-
-        // Check if cropped size is correct BEFORE pixel buffer conversion
-        guard
-            abs(croppedImage.size.width - targetPixelCGSize.width) < 0.1
-                && abs(croppedImage.size.height - targetPixelCGSize.height) < 0.1
-        else {
-            print(
-                "🔴 Preprocessing: Cropped image size \(croppedImage.size) is NOT the target pixel size \(targetPixelCGSize) before pixel buffer conversion."
-            )
-            return nil
-        }
-
-        // 4. Convert the final cropped image to CVPixelBuffer
+        // 2. Convert the resized image to CVPixelBuffer
+        // The pixelBufferFromImage function expects the input UIImage's size (in points)
+        // to match the expectedSize (in pixels) because it assumes scale=1.0 input
+        // after cropping. Let's adjust the check or ensure the input image size is correct.
+        // Since resize(to:) creates an image with the correct point size, this should work.
         guard
             let pixelBuffer = pixelBufferFromImage(
-                image: croppedImage, expectedSize: targetPixelCGSize)
-        else {  // Pass targetPixelCGSize
-            print("🔴 Preprocessing: Failed to convert final cropped image to CVPixelBuffer.")
+                image: resizedImage, expectedSize: targetPixelCGSize)
+        else {
+            print("🔴 Preprocessing (Revised): Failed to convert resized image to CVPixelBuffer.")
             return nil
         }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-        print("➡️ Preprocessing: Final pixel buffer size \(width)x\(height)")
+        print("➡️ Preprocessing (Revised): Final pixel buffer size \(width)x\(height)")
+
+        // Ensure the final buffer size is exactly the target size
+        guard width == targetSize && height == targetSize else {
+            print(
+                "🔴 Preprocessing (Revised): Final pixel buffer size \(width)x\(height) does not match target \(targetSize)x\(targetSize)."
+            )
+            return nil
+        }
 
         return pixelBuffer
     }
-
     // Convert UIImage to CVPixelBuffer (kCVPixelFormatType_32BGRA)
     // Added expectedSize check for safety.
     private func pixelBufferFromImage(image: UIImage, expectedSize: CGSize) -> CVPixelBuffer? {
@@ -1006,7 +980,7 @@ class StyleTransferService: ObservableObject {
         case outputNameNotDetermined(String)  // Include details
         case inputNameNotDetermined(String)  // Include details
         case inputMismatch(String)  // For cases where type is wrong (e.g., expected MultiArray, got Image)
-        case outputTypeMismatch(String) // Added for Image output case
+        case outputTypeMismatch(String)  // Added for Image output case
 
         var errorDescription: String? {
             switch self {
