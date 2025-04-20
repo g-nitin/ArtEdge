@@ -3,8 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     // Keep StyleTransferService
-    @StateObject private var styleTransferService = StyleTransferService(
-        modelName: "AesFA")  // Initialize service
+    @StateObject private var styleTransferService = StyleTransferService()  // Initialize service
 
     // State for UI elements and selections
     @State private var contentImage: UIImage?
