@@ -13,6 +13,9 @@ struct ContentView: View {
     let availableModels: [String] = ["AdaIn", "AesFA"]  // Add your actual model names here
     @State private var selectedModelName: String
 
+    // State to control camera picker presentation
+    @State private var showCameraPicker = false
+
     // Initialize StyleTransferService with the initial model
     // Use @StateObject correctly with initial parameter
     @StateObject private var styleTransferService: StyleTransferService
@@ -52,20 +55,12 @@ struct ContentView: View {
                     Image("ArtEdgeLogoBanner")
                         .resizable()
                         .scaledToFit()
-                        // Define the desired frame for the *visible* banner area
-                        // Use maxWidth: .infinity to take available width
-                        // Set the desired *visual height* for your banner content
                         .frame(maxWidth: .infinity)
                         .clipped()
-                        .padding(.bottom, 10)  // Add space below the banner
-                    // Optional: Add horizontal padding if you DON'T want it edge-to-edge
-                    // .padding(.horizontal)
-                    // Optional: Add a background or divider if desired
-                    // Color: #FCF7F3
-                    // .background(Color(red: 252/255, green: 247/255, blue: 243/255))
+                        .padding(.bottom, 10)
 
                     ScrollView {
-                        VStack(spacing: 15) {  // Original spacing for content sections
+                        VStack(spacing: 15) {
                             modelSelectionSection
                             Divider()
                             contentImageSection
@@ -83,7 +78,6 @@ struct ContentView: View {
                 }
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
-                // Apply the same background inside the navigation view
                 .background(Color(red: 252 / 255, green: 247 / 255, blue: 243 / 255))
             }
         }
@@ -92,17 +86,17 @@ struct ContentView: View {
         .onChange(of: selectedPhotoItem) { newItem in
             handlePhotoSelection(newItem: newItem)
         }
-
+        // Clear photo item if image is set via camera
+        .onChange(of: contentImage) { newImage in
+            if newImage != nil && selectedPhotoItem != nil {
+                // If we set the image (likely from camera), deselect the PhotosPickerItem
+                // to avoid potential confusion or re-triggering library load.
+                selectedPhotoItem = nil
+            }
+        }
         .onChange(of: selectedModelName) { newName in
             print("ContentView: Detected model selection change to '\(newName)'")
-            // Reset UI state related to previous model's results
             resultImage = nil
-            // Optionally clear content/style if models are incompatible
-            // contentImage = nil
-            // selectedStyle = nil
-            // styleTransferService.loadStyleImage(named: "") // Clear style in service?
-
-            // Set loading message immediately
             userMessage = "Switching to model \(newName)..."
             // Tell the service to switch
             styleTransferService.switchModel(to: newName)
@@ -126,15 +120,10 @@ struct ContentView: View {
         .onReceive(styleTransferService.$isProcessing) { processing in
             handleProcessingStatus(processing: processing)
         }
-        // Optional: Add onAppear if initial load needs specific handling
-        // .onAppear {
-        //     if !styleTransferService.isModelLoaded && styleTransferService.error == nil {
-        //         // If service was initialized without a model or failed initially
-        //         userMessage = "Loading initial model..."
-        //         // You might trigger loadModel here if not done in init
-        //         // styleTransferService.loadModel(named: selectedModelName)
-        //     }
-        // }
+        // Present the ImagePicker sheet when showCameraPicker is true
+        .fullScreenCover(isPresented: $showCameraPicker) {
+            ImagePicker(image: $contentImage, isPresented: $showCameraPicker, sourceType: .camera)
+        }
     }
 
     private var modelSelectionSection: some View {
@@ -173,18 +162,34 @@ struct ContentView: View {
                     .fill(Color.secondary.opacity(0.1))
                     .frame(height: 150)
                     .cornerRadius(8)
-                    .overlay(Text("Select an image").foregroundColor(.secondary))
+                    .overlay(Text("Select or take a photo").foregroundColor(.secondary))
             }
 
-            PhotosPicker(
-                selection: $selectedPhotoItem,  // Bind selection
-                matching: .images,  // Filter for images
-                photoLibrary: .shared()  // Use shared library
-            ) {  // Provide the label content in the trailing closure
-                Label("Select from Library", systemImage: "photo.on.rectangle")
-            }
-            .buttonStyle(.bordered)
-            // TODO: Add "Take Photo" button here later if needed
+            HStack(spacing: 15) {  // Use HStack to place buttons side-by-side
+                // Photos Picker Button
+                PhotosPicker(
+                    selection: $selectedPhotoItem,
+                    matching: .images,
+                    photoLibrary: .shared()
+                ) {
+                    Label("Library", systemImage: "photo.on.rectangle")
+                }
+                .buttonStyle(.bordered)
+
+                // Take Photo Button
+                Button {
+                    // Action to show the camera picker
+                    showCameraPicker = true
+                } label: {
+                    Label("Photo", systemImage: "camera.fill")
+                }
+                .buttonStyle(.bordered)
+                // Disable if camera is not available (e.g., simulator)
+                .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
+
+            }  // End HStack
+            .padding(.top, 5)  // Add a little space above the buttons
+
         }
         .padding(.horizontal)
     }
@@ -197,7 +202,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundColor(.blue)
             } else {
-                Text("Tap a style below")  // Placeholder
+                Text("Tap a style below")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -205,7 +210,7 @@ struct ContentView: View {
                 LazyHStack(spacing: 15) {
                     ForEach(availableStyles) { style in
                         VStack {
-                            Image(style.assetName)  // Assumes images are in Assets
+                            Image(style.assetName)
                                 .resizable()
                                 .scaledToFill()
                                 .frame(width: 80, height: 80)
@@ -218,9 +223,8 @@ struct ContentView: View {
                                 )
                                 .onTapGesture {
                                     selectedStyle = style
-                                    // Load the style image into the service
                                     styleTransferService.loadStyleImage(named: style.assetName)
-                                    userMessage = nil  // Clear message on style selection
+                                    userMessage = nil
                                 }
                             Text(style.name).font(.caption).lineLimit(1)
                         }
@@ -229,7 +233,7 @@ struct ContentView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 5)
             }
-            .frame(height: 110)  // Give the scroll view a fixed height
+            .frame(height: 110)
         }
     }
 
@@ -248,12 +252,12 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.borderedProminent)
-        .disabled(!canProcess)  // Disable if not ready or processing
+        .disabled(!canProcess)
         .padding(.top)
     }
 
     private var userMessageSection: some View {
-        Group {  // Use Group to return optional view
+        Group {
             if let message = userMessage {
                 Text(message)
                     .foregroundColor(styleTransferService.error != nil ? .red : .secondary)
@@ -315,52 +319,62 @@ struct ContentView: View {
 
     // Handle Photo Picker Selection
     func handlePhotoSelection(newItem: PhotosPickerItem?) {
-        Task {  // Use Task for async work
-            // Clear previous state immediately for better UX
-            contentImage = nil
+        Task {
+            // Clear previous state immediately
+            // Don't clear contentImage here, let the loading handle it
+            // contentImage = nil
             resultImage = nil
-            userMessage = "Loading image..."
+            userMessage = "Loading image..."  // Show loading message
 
             guard let item = newItem else {
-                userMessage = nil  // Clear message if selection is cancelled
+                // Only clear message if no image is currently loaded
+                if contentImage == nil {
+                    userMessage = nil
+                } else {
+                    // Keep the existing image, clear the loading message
+                    userMessage = nil
+                }
                 return
             }
 
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
                     if let uiImage = UIImage(data: data) {
-                        contentImage = uiImage
+                        // Successfully loaded image from library
+                        contentImage = uiImage  // Update the content image
                         userMessage = nil  // Clear message
-                        print("✅ Content image loaded.")
+                        print("✅ Content image loaded from library.")
                     } else {
                         userMessage = "Error: Could not decode selected image."
                         print("🔴 Failed to create UIImage from selected data.")
+                        // Keep existing image if decoding fails? Or set to nil?
+                        // contentImage = nil // Optional: clear image on decode failure
                     }
                 } else {
                     userMessage = "Error: Could not load image data."
                     print("🔴 Failed to load transferable data from PhotosPickerItem.")
+                    // Keep existing image if loading fails? Or set to nil?
+                    // contentImage = nil // Optional: clear image on load failure
                 }
             } catch {
                 userMessage = "Error loading image: \(error.localizedDescription)"
                 print("🔴 Error loading transferable data: \(error)")
+                // Keep existing image on error? Or set to nil?
+                // contentImage = nil // Optional: clear image on error
             }
         }
     }
 
     // Handle Model Loading Status
     func handleModelLoadingStatus(loaded: Bool) {
-        // Update message based on loading status, avoid overwriting specific errors
         if !loaded && styleTransferService.error == nil {
-            // This might briefly show if switching starts before the loading message is set
-            // userMessage = "Loading style transfer model..."
+            // Handled by the .onChange(of: selectedModelName)
         } else if loaded {
-            // Check if the current message indicates loading, then clear it
             if userMessage == "Loading initial model..."
                 || userMessage == "Switching to model \(selectedModelName)..."
                 || userMessage == "Loading selected model..."
             {
                 userMessage = "Model '\(selectedModelName)' loaded. Ready."
-                // Optionally clear the "Ready" message after a delay
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     if userMessage == "Model '\(selectedModelName)' loaded. Ready." {
                         userMessage = nil
@@ -392,14 +406,10 @@ struct ContentView: View {
     // Handle Processing Status Updates
     func handleProcessingStatus(processing: Bool) {
         if processing {
-            userMessage = "Processing..."  // Set status message when processing starts
+            userMessage = "Processing..."
         } else if userMessage == "Processing..." {
-            // If processing finished and the message was "Processing...",
-            // clear it *only if* there's no error and there is a result.
-            // If there's an error, the error handler will set the message.
-            // If there's no result (conversion failed), that error handler sets the message.
             if styleTransferService.error == nil && resultImage != nil {
-                userMessage = nil  // Clear message on successful completion
+                userMessage = nil
             }
         }
     }
