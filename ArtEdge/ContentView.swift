@@ -4,13 +4,12 @@ import SwiftUI
 struct ContentView: View {
     // State for UI elements and selections
     @State private var contentImage: UIImage?
-    @State private var selectedPhotoItem: PhotosPickerItem?  // For PhotoPicker selection binding
+    @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var selectedStyle: StyleInfo?
-    @State private var resultImage: Image?  // Use SwiftUI Image for display
-    @State private var userMessage: String?  // For showing errors or status
-    // List of available model *filenames* (without .mlmodelc extension)
-    // Ensure these files are actually added to your Xcode project target!
-    let availableModels: [String] = ["AdaIn", "AesFA"]  // Add your actual model names here
+    @State private var resultImage: Image?
+    @State private var userMessage: String?
+    // List of available model *filenames*
+    let availableModels: [String] = ["AdaIn", "AesFA", "StarryNightStyleTransfer"]  // Ensure StarryNightStyleTransfer is added
     @State private var selectedModelName: String
 
     // State to control camera picker presentation
@@ -22,10 +21,16 @@ struct ContentView: View {
 
     // Computed property to check if processing can start
     private var canProcess: Bool {
-        contentImage != nil && selectedStyle != nil && !styleTransferService.isProcessing
-            && styleTransferService.isModelLoaded  // Check if model is loaded AND ready
+        // Allow processing if:
+        // - Content image exists AND
+        // - EITHER it's a single-input model OR a style is selected for dual-input models AND
+        // - Not currently processing AND
+        // - Model is loaded and ready
+        contentImage != nil && (styleTransferService.isSingleInputModel || selectedStyle != nil)  // Adjusted logic
+            && !styleTransferService.isProcessing && styleTransferService.isModelLoaded
     }
 
+    // Available styles (only relevant for dual-input models)
     let availableStyles: [StyleInfo] = [
         StyleInfo(name: "Starry Night", assetName: "starry_night"),
         StyleInfo(name: "The Scream", assetName: "the_scream"),
@@ -36,7 +41,7 @@ struct ContentView: View {
     // Custom Initializer for StateObject
     init() {
         // Set the initial model name here
-        let initialModelName = "AesFA"
+        let initialModelName = "AdaIn"
         _selectedModelName = State(initialValue: initialModelName)
         // Initialize the StateObject with the initial model name
         _styleTransferService = StateObject(
@@ -65,8 +70,19 @@ struct ContentView: View {
                             Divider()
                             contentImageSection
                             Divider()
-                            styleSelectionSection
-                            Divider()
+                            // Conditionally show style selection
+                            if !styleTransferService.isSingleInputModel {
+                                styleSelectionSection
+                                Divider()
+                            } else {
+                                // Optional: Show a message instead of style selection
+                                Text("Style is built into the selected model.")
+                                    .font(.headline)
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal)
+                                    .padding(.vertical, 10)  // Add some spacing
+                                Divider()
+                            }
                             actionButtonSection
                             userMessageSection
                             resultSection
@@ -98,7 +114,9 @@ struct ContentView: View {
             print("ContentView: Detected model selection change to '\(newName)'")
             resultImage = nil
             userMessage = "Switching to model \(newName)..."
-            // Tell the service to switch
+            // Clear selected style if switching TO a single-input model (or always clear?)
+            // Let's clear it always for simplicity when switching models
+            selectedStyle = nil
             styleTransferService.switchModel(to: newName)
         }
         .onReceive(styleTransferService.$styledImage) { newStyledImage in
@@ -120,7 +138,24 @@ struct ContentView: View {
         .onReceive(styleTransferService.$isProcessing) { processing in
             handleProcessingStatus(processing: processing)
         }
-        // Present the ImagePicker sheet when showCameraPicker is true
+        // React to model type change to potentially clear messages
+        .onReceive(styleTransferService.$isSingleInputModel) { isSingle in
+            if isSingle && selectedStyle != nil {
+                // If we switched to single input and a style was selected, clear it
+                selectedStyle = nil
+                // Maybe update user message?
+                // userMessage = "Style selection disabled for this model."
+            }
+            // Clear style-related errors if switching to single input
+            if isSingle,
+                let currentError = styleTransferService.error
+                    as? StyleTransferService.StyleTransferError,
+                currentError == .styleImageNotSet
+            {
+                styleTransferService.error = nil  // Clear the error
+                userMessage = nil  // Clear the message too
+            }
+        }
         .fullScreenCover(isPresented: $showCameraPicker) {
             ImagePicker(image: $contentImage, isPresented: $showCameraPicker, sourceType: .camera)
         }
@@ -222,9 +257,19 @@ struct ContentView: View {
                                             lineWidth: selectedStyle == style ? 3 : 1)
                                 )
                                 .onTapGesture {
+                                    // Only process tap if it's NOT a single input model
+                                    // (Although this section is hidden, add check for safety)
+                                    guard !styleTransferService.isSingleInputModel else { return }
                                     selectedStyle = style
+                                    // Load the style image in the service
                                     styleTransferService.loadStyleImage(named: style.assetName)
-                                    userMessage = nil
+                                    // Clear user message if it was a style error
+                                    if let currentError = styleTransferService.error
+                                        as? StyleTransferService.StyleTransferError,
+                                        currentError == .styleImageNotSet
+                                    {
+                                        userMessage = nil
+                                    }
                                 }
                             Text(style.name).font(.caption).lineLimit(1)
                         }
@@ -234,6 +279,8 @@ struct ContentView: View {
                 .padding(.vertical, 5)
             }
             .frame(height: 110)
+            // Disable interaction if processing OR if it's a single input model (redundant but safe)
+            .disabled(styleTransferService.isProcessing || styleTransferService.isSingleInputModel)
         }
     }
 
@@ -305,13 +352,32 @@ struct ContentView: View {
 
     // Function to trigger style transfer
     func applyStyle() {
-        guard let content = contentImage, let style = selectedStyle else {
-            userMessage = "Please select both a content image and a style."
+        guard let content = contentImage else {
+            userMessage = "Please select a content image."
             return
         }
 
-        // Ensure the correct style is loaded in the service (might be redundant if already done on tap, but safe)
-        styleTransferService.loadStyleImage(named: style.assetName)
+        // Check if a style is required (i.e., not a single-input model) AND if it's missing
+        if !styleTransferService.isSingleInputModel && selectedStyle == nil {
+            userMessage = "Please select a style for the '\(selectedModelName)' model."
+            // Ensure the service reflects this error state too
+            styleTransferService.error = StyleTransferService.StyleTransferError.styleImageNotSet
+            return
+        }
+
+        // If it's a dual-input model, ensure the selected style is loaded (should be done on tap, but double-check)
+        if !styleTransferService.isSingleInputModel, let style = selectedStyle {
+            styleTransferService.loadStyleImage(named: style.assetName)
+            // Check if loading the style failed immediately before processing
+            if let currentError = styleTransferService.error
+                as? StyleTransferService.StyleTransferError,
+                currentError == .styleImageNotFound || currentError == .styleImageProcessingFailed
+            {
+                userMessage =
+                    "Error: Could not load the selected style image. \(currentError.localizedDescription)"
+                return
+            }
+        }
 
         print("🚀 Triggering style transfer process...")
         styleTransferService.process(contentImage: content)
@@ -368,15 +434,20 @@ struct ContentView: View {
     // Handle Model Loading Status
     func handleModelLoadingStatus(loaded: Bool) {
         if !loaded && styleTransferService.error == nil {
-            // Handled by the .onChange(of: selectedModelName)
+            // Loading initiated, message handled by onChange(of: selectedModelName)
         } else if loaded {
             if userMessage == "Loading initial model..."
                 || userMessage == "Switching to model \(selectedModelName)..."
                 || userMessage == "Loading selected model..."
             {
                 userMessage = "Model '\(selectedModelName)' loaded. Ready."
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    if userMessage == "Model '\(selectedModelName)' loaded. Ready." {
+                // Add specific info if it's single input
+                if styleTransferService.isSingleInputModel {
+                    userMessage = "Model '\(selectedModelName)' loaded (Style built-in). Ready."
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {  // Slightly longer delay
+                    if userMessage?.contains("loaded. Ready.") ?? false {
                         userMessage = nil
                     }
                 }
