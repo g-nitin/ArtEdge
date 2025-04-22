@@ -488,6 +488,9 @@ class StyleTransferService: ObservableObject {
             return
         }
 
+        let originalContentPointSize = contentImage.size
+        print("ℹ️ Original content image size (points): \(originalContentPointSize)")
+
         // Content Input Handling (Common Step)
         print(
             "ℹ️ Preprocessing content image to size: \(requiredInputSize.width)x\(requiredInputSize.height)"
@@ -663,17 +666,55 @@ class StyleTransferService: ObservableObject {
                         "Output type was not determined during model load.")
                 }
 
+                // RESIZE OUTPUT TO MATCH ORIGINAL CONTENT
+                guard var finalUIImage = resultUIImage else {
+                    // This should not happen if the above checks passed, but safeguard anyway
+                    print("🔴 Internal Error: resultUIImage was nil after conversion.")
+                    throw StyleTransferError.predictionFailed(
+                        "Internal error during output conversion.")  // Or a more specific error
+                }
+
+                let modelOutputPointSize = finalUIImage.size
+                print("ℹ️ Model direct output size (points): \(modelOutputPointSize)")
+
+                // Compare model output size with original content size (allow small tolerance)
+                let widthDifference = abs(
+                    originalContentPointSize.width - modelOutputPointSize.width)
+                let heightDifference = abs(
+                    originalContentPointSize.height - modelOutputPointSize.height)
+
+                if widthDifference > 1 || heightDifference > 1 {
+                    print(
+                        "ℹ️ Resizing model output (\(modelOutputPointSize)) back to original content size (\(originalContentPointSize))..."
+                    )
+                    // Use the existing resize extension which takes point size
+                    if let resizedOutput = finalUIImage.resize(to: originalContentPointSize) {
+                        finalUIImage = resizedOutput  // Update finalUIImage with the resized version
+                        print("✅ Resized output image successfully to \(finalUIImage.size).")
+                    } else {
+                        print(
+                            "⚠️ Warning: Failed to resize output image back to original size. Using model output size."
+                        )
+                        // Keep finalUIImage as is (the model's output size)
+                    }
+                } else {
+                    print("ℹ️ Model output size matches original content size. No resizing needed.")
+                }
+
                 // --- Update UI (Common logic) ---
                 let endTime = Date()
                 let timeInterval = endTime.timeIntervalSince(startTime) * 1000
 
-                // Update UI
+                // Update UI with the potentially resized image
                 DispatchQueue.main.async {
-                    self.styledImage = Image(uiImage: resultUIImage!)  // Force unwrap safe due to checks above
+                    // Use the finalUIImage which might have been resized
+                    self.styledImage = Image(uiImage: finalUIImage)
                     self.error = nil
                     self.processingTime = timeInterval
                     self.isProcessing = false
-                    print("✅ Processing successful. Time: \(timeInterval) ms")
+                    print(
+                        "✅ Processing successful. Final image size (points): \(finalUIImage.size). Time: \(timeInterval) ms"
+                    )
                 }
 
             } catch let processingError {  // Catch errors from prediction or conversion
@@ -1027,7 +1068,7 @@ class StyleTransferService: ObservableObject {
                 pixelData[pixelIndex + 0] = r_uint8  // Red
                 pixelData[pixelIndex + 1] = g_uint8  // Green
                 pixelData[pixelIndex + 2] = b_uint8  // Blue
-                pixelData[pixelIndex + 3] = 255      // Alpha
+                pixelData[pixelIndex + 3] = 255  // Alpha
 
                 // SWAP R and B channels here
                 // pixelData[pixelIndex + 0] = b_uint8  // Assign Blue to Red position
