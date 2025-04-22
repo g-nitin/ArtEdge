@@ -991,7 +991,7 @@ class StyleTransferService: ObservableObject {
             dataPointer: dataPointer, std: std, mean: mean)  // Center
         print("----------------------------------------------------")
 
-        // --- Image Creation Loop (Keep the channel swap active for now) ---
+        // Image Creation Loop
         for y in 0..<height {
             for x in 0..<width {
                 // Calculate indices for R, G, B channels in the flat dataPointer
@@ -1023,11 +1023,17 @@ class StyleTransferService: ObservableObject {
                 // Calculate the index in the output pixelData buffer (RGBA)
                 let pixelIndex = (y * bytesPerRow) + (x * 4)
 
+                // Assign in RGBA order to match CGImage parameters
+                pixelData[pixelIndex + 0] = r_uint8  // Red
+                pixelData[pixelIndex + 1] = g_uint8  // Green
+                pixelData[pixelIndex + 2] = b_uint8  // Blue
+                pixelData[pixelIndex + 3] = 255      // Alpha
+
                 // SWAP R and B channels here
-                pixelData[pixelIndex + 0] = b_uint8  // Assign Blue to Red position
-                pixelData[pixelIndex + 1] = g_uint8  // Green remains Green
-                pixelData[pixelIndex + 2] = r_uint8  // Assign Red to Blue position
-                pixelData[pixelIndex + 3] = 255  // Alpha
+                // pixelData[pixelIndex + 0] = b_uint8  // Assign Blue to Red position
+                // pixelData[pixelIndex + 1] = g_uint8  // Green remains Green
+                // pixelData[pixelIndex + 2] = r_uint8  // Assign Red to Blue position
+                // pixelData[pixelIndex + 3] = 255  // Alpha
 
                 // Original assignment (commented out):
                 // pixelData[pixelIndex + 0] = r_uint8  // R

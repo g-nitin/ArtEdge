@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var resultImage: Image?
     @State private var userMessage: String?
     // List of available model *filenames*
-    let availableModels: [String] = ["AdaIn", "AesFA", "StarryNightStyleTransfer"]  // Ensure StarryNightStyleTransfer is added
+    let availableModels: [String] = ["AdaIN", "Starry-AdaIN", "AesFA"]
     @State private var selectedModelName: String
 
     // State to control camera picker presentation
@@ -41,7 +41,7 @@ struct ContentView: View {
     // Custom Initializer for StateObject
     init() {
         // Set the initial model name here
-        let initialModelName = "AdaIn"
+        let initialModelName = "AdaIN"
         _selectedModelName = State(initialValue: initialModelName)
         // Initialize the StateObject with the initial model name
         _styleTransferService = StateObject(
@@ -301,6 +301,7 @@ struct ContentView: View {
         .buttonStyle(.borderedProminent)
         .disabled(!canProcess)
         .padding(.top)
+        .padding(.bottom, 5)
     }
 
     private var userMessageSection: some View {
@@ -311,43 +312,60 @@ struct ContentView: View {
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
-                    .padding(.top, 5)  // Add some spacing
+                    .padding(.bottom, 10)
             } else {
-                // Optionally add an empty Text view to maintain layout stability
-                Text(" ").font(.caption)
+                // Add an empty Text view with padding to maintain layout stability
+                Text(" ")
+                    .font(.caption)
                     .padding(.horizontal)
-                    .padding(.top, 5)
+                    .padding(.bottom, 10)
             }
         }
     }
 
     private var resultSection: some View {
-        Group {  // Use Group as the container might be empty
+        // Use VStack to group result elements if a result exists or is processing
+        VStack {
             if styleTransferService.isProcessing {
-                Spacer()  // Push result area down while processing
-                // Optionally add a small indicator here too
-                // ProgressView("Processing...")
-                //    .padding(.top)
+                // Show progress indicator while processing
+                ProgressView()
+                    .padding(.top)  // Add some space above the indicator
             } else if let result = resultImage {
-                VStack {
-                    Text("Result").font(.headline).padding(.top)
-                    result
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxHeight: 250)
-                        .cornerRadius(8)
-                    Text(
-                        "Processing Time: \(String(format: "%.1f", styleTransferService.processingTime)) ms"
-                    )
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                }
-                .padding(.horizontal)
-                Spacer()  // Push result to bottom when available
-            } else {
-                Spacer()  // Keep layout consistent when no result/not processing
+                // Add a divider for visual separation before the result appears
+                Divider()
+                    .padding(.vertical, 10)  // Add space around the divider
+
+                Text("Result")
+                    .font(.headline)
+
+                result  // The styled image
+                    .resizable()
+                    .scaledToFit()  // Allows it to grow to fit width, maintaining aspect ratio
+                    // No maxHeight constraint applied here
+                    .cornerRadius(8)
+                    .padding(.vertical, 5)  // Add some vertical padding around the image
+                    // Add context menu for saving (Example)
+                    .contextMenu {
+                        Button {
+                            saveImage(image: result)
+                        } label: {
+                            Label("Save Image", systemImage: "square.and.arrow.down")
+                        }
+                    }
+
+                Text(
+                    "Processing Time: \(String(format: "%.1f", styleTransferService.processingTime)) ms"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.bottom)  // Add padding below the time text
             }
+            // No Spacer needed inside this VStack
+            // If neither processing nor result exists, this VStack will be empty
+            // and take up minimal space.
         }
+        .padding(.horizontal)  // Apply horizontal padding to the whole result section content
+        // The Spacer() at the end of the outer ScrollView's VStack handles pushing content up.
     }
 
     // Function to trigger style transfer
@@ -480,8 +498,40 @@ struct ContentView: View {
             userMessage = "Processing..."
         } else if userMessage == "Processing..." {
             if styleTransferService.error == nil && resultImage != nil {
-                userMessage = nil
+                userMessage = nil  // Clear "Processing..." only on success
             }
+            // If there was an error, handleServiceError will set the message
+        }
+    }
+
+    // Example Save Image Function (Requires rendering SwiftUI Image to UIImage)
+    func saveImage(image: Image) {
+        // 1. Render the SwiftUI Image to a UIImage
+        // Note: This requires the ImageRenderer available in iOS 16+
+        // For older iOS, you might need a different approach or pass the UIImage directly.
+        if #available(iOS 16.0, *) {
+            let renderer = ImageRenderer(content: image)
+            // Ensure the renderer uses the device scale for best quality
+            renderer.scale = UIScreen.main.scale
+
+            if let uiImage = renderer.uiImage {
+                // 2. Save the UIImage to the photo library
+                UIImageWriteToSavedPhotosAlbum(uiImage, nil, nil, nil)
+                userMessage = "Result saved to Photos!"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    if userMessage == "Result saved to Photos!" {
+                        userMessage = nil
+                    }
+                }
+            } else {
+                userMessage = "Error: Could not render image for saving."
+            }
+        } else {
+            // Fallback for earlier iOS versions - saving might not be directly possible
+            // from the SwiftUI Image object easily. You might need to store the
+            // result UIImage from the service separately if needed for saving on < iOS 16.
+            userMessage = "Error: Saving requires iOS 16 or later."
+            print("⚠️ Image saving requires iOS 16+ ImageRenderer.")
         }
     }
 }
