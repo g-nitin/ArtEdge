@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var resultImage: Image?
     @State private var userMessage: String?
     // List of available model *filenames*
-    let availableModels: [String] = ["AdaIN", "Starry-AdaIN", "AesFA"]
+    let availableModels: [String] = ["AdaIN", "Starry-FST", "AesFA"]
     @State private var selectedModelName: String
 
     // State to control camera picker presentation
