@@ -3,8 +3,8 @@ import SwiftUI
 import UIKit
 
 enum ModelFamily: String, CaseIterable, Identifiable {
-    case adain = "AdaIN"  // Single-style models, loaded via style selection
-    case fst = "FST"  // Single-style models, loaded via style selection
+    case adain = "AdaIN"  // Single-style models, BUT require style image input as per new req.
+    case fst = "FST"  // Single-style models, loaded via style selection (truly single input)
     case aesfa = "AesFA"  // Arbitrary model, loaded on family selection
     case stytr2 = "StyTR2"  // Arbitrary model, loaded on family selection
 
@@ -14,14 +14,16 @@ enum ModelFamily: String, CaseIterable, Identifiable {
     // Returns nil for families where the model is loaded via style selection
     var primaryModelFilename: String? {
         switch self {
-        case .adain: return nil  // Model determined by style selection
+        // AdaIN models are loaded via style selection, so no primary model here.
+        case .adain: return nil
         case .fst: return nil  // Model determined by style selection
         case .aesfa: return "AesFA"  // This model is loaded when family is selected
-        case .stytr2: return "StyTr2"  // This model is loaded when family is selected (Corrected filename)
+        case .stytr2: return "StyTr2"  // This model is loaded when family is selected
         }
     }
 
-    // Check if this family uses single-style models loaded via style tap
+    // Check if this family uses models loaded via style tap
+    // Both AdaIN and FST models are loaded this way.
     var isSingleStyleFamily: Bool {
         switch self {
         case .adain, .fst: return true
@@ -30,10 +32,23 @@ enum ModelFamily: String, CaseIterable, Identifiable {
     }
 
     // Check if this family represents an arbitrary style transfer model
+    // (can take any style image as input)
     var isArbitraryStyleFamily: Bool {
         switch self {
+        // AdaIN is NOT arbitrary, even though it takes 2 inputs now.
+        // FST is NOT arbitrary.
         case .adain, .fst: return false
         case .aesfa, .stytr2: return true
+        }
+    }
+
+    // NEW: Check if this family requires a style IMAGE input during processing
+    // This is true for arbitrary models AND the modified AdaIN flow.
+    var requiresStyleImageInput: Bool {
+        switch self {
+        case .adain: return true  // AdaIN models now require the style image input
+        case .fst: return false  // FST models are truly single-input
+        case .aesfa, .stytr2: return true  // Arbitrary models require style image input
         }
     }
 }
@@ -98,29 +113,39 @@ struct ContentView: View {
     // Computed property to check if processing can start
     private var canProcess: Bool {
         let hasContent = contentImage != nil
-        let modelReady = styleTransferService.isModelLoaded  // A model (either arbitrary or specific single-style) must be loaded
+        // A model must be loaded (specific single-style or arbitrary)
+        let modelReady = styleTransferService.isModelLoaded
         let serviceIdle = !styleTransferService.isProcessing
-        var styleRequirementMet = false
+        // A style must have been selected (either to load the model or provide input)
+        let styleSelected = selectedStyle != nil
 
-        if selectedModelFamily.isArbitraryStyleFamily {
-            // Arbitrary models require a style *input* to be selected
-            styleRequirementMet = (selectedStyle != nil)
-            // Also ensure the loaded model is NOT single-input (sanity check)
-            styleRequirementMet = styleRequirementMet && !styleTransferService.isSingleInputModel
-        } else if selectedModelFamily.isSingleStyleFamily {
-            // Single-style families require a style to have been tapped (which loads the model)
-            // The modelReady check covers that the model is loaded.
-            // We also need selectedStyle to be non-nil because tapping sets it.
-            styleRequirementMet = (selectedStyle != nil)
-            // Also ensure the loaded model IS single-input (sanity check)
-            styleRequirementMet = styleRequirementMet && styleTransferService.isSingleInputModel
+        // Additional check: If the model requires a style image input (AdaIN, AesFA, StyTR2),
+        // ensure the style image loading hasn't failed. We infer this by checking
+        // that the error state isn't specifically a style-loading error.
+        var styleInputRequirementMet = true
+        if selectedModelFamily.requiresStyleImageInput && modelReady {
+            if let currentError = styleTransferService.error
+                as? StyleTransferService.StyleTransferError
+            {
+                switch currentError {
+                case .styleImageNotFound, .styleImageProcessingFailed, .styleImageNotSet:
+                    styleInputRequirementMet = false  // Style input is required but failed/missing
+                default:
+                    styleInputRequirementMet = true  // Other errors don't block based on style input state
+                }
+            } else {
+                // No error, assume style input is loaded or will be loaded correctly if needed.
+                // Note: This assumes loadStyleImage was called correctly after model load for AdaIN.
+                styleInputRequirementMet = true
+            }
         }
 
         // Combine all conditions
-        let allMet = hasContent && modelReady && serviceIdle && styleRequirementMet
+        let allMet =
+            hasContent && modelReady && serviceIdle && styleSelected && styleInputRequirementMet
 
         // Debugging log for canProcess state changes
-        // print("ℹ️ canProcess check: hasContent=\(hasContent), modelReady=\(modelReady), serviceIdle=\(serviceIdle), styleReqMet=\(styleRequirementMet) -> \(allMet)")
+        // print("ℹ️ canProcess check: hasContent=\(hasContent), modelReady=\(modelReady), serviceIdle=\(serviceIdle), styleSelected=\(styleSelected), styleInputReqMet=\(styleInputRequirementMet) -> \(allMet)")
 
         return allMet
     }
@@ -128,7 +153,7 @@ struct ContentView: View {
     // Custom Initializer
     init() {
         // Start with an arbitrary family (e.g., AesFA) so a model loads initially
-        let initialFamily: ModelFamily = .aesfa
+        let initialFamily: ModelFamily = .adain
         _selectedModelFamily = State(initialValue: initialFamily)
 
         // Initialize the service with the initial family's primary model filename
@@ -198,8 +223,10 @@ struct ContentView: View {
             handleStyledImageUpdate(newStyledImage: newStyledImage)
         }
         .onReceive(styleTransferService.$error) { error in handleServiceError(error: error) }
-        .onReceive(styleTransferService.$isModelLoaded) { loaded in
-            handleModelLoadingStatus(loaded: loaded)
+        .onChange(of: styleTransferService.isModelLoaded) { loaded in
+            handleModelLoadingStatus(loaded: loaded)  // Existing handler
+            // NEW: Trigger style image loading for AdaIN *after* its model loads
+            triggerAdaINStyleImageLoadIfNeeded(modelIsLoaded: loaded)
         }
         .onReceive(styleTransferService.$isProcessing) { processing in
             handleProcessingStatus(processing: processing)
@@ -313,11 +340,11 @@ struct ContentView: View {
                 .padding(.vertical, 5)  // Add vertical padding
             }
             .frame(height: 110)  // Fixed height for the scroll view
-            // Disable while processing OR if a single-style model is currently loading (indicated by isModelLoaded=false AND selectedStyle being set)
+            // Disable while processing OR if a model is currently loading (indicated by isModelLoaded=false AND a style was selected to trigger it)
             .disabled(
                 styleTransferService.isProcessing
-                    || (selectedModelFamily.isSingleStyleFamily
-                        && !styleTransferService.isModelLoaded && selectedStyle != nil)
+                    || (!styleTransferService.isModelLoaded && selectedStyle != nil
+                        && selectedModelFamily.isSingleStyleFamily)
             )
         }
     }
@@ -325,16 +352,16 @@ struct ContentView: View {
     // Helper computed properties for style section UI
     private var styleSectionTitle: String {
         switch selectedModelFamily {
-        case .adain, .fst:
-            return "3. Select Style (Loads Model)"  // Step 3 for these families
-        case .aesfa, .stytr2:
-            return "3. Select Style Input"  // Step 3 for these families
+        // Both load via tap, but AdaIN now also needs the image *input*
+        case .adain: return "3. Select Style"
+        case .fst: return "3. Select Style"
+        case .aesfa, .stytr2: return "3. Select Style"
         }
     }
 
     private var styleSectionPrompt: String {
         switch selectedModelFamily {
-        case .adain: return "Tap an AdaIN style below to load its model"
+        case .adain: return "Tap an AdaIN style below to load its model and style data"
         case .fst: return "Tap an FST style below to load its model"
         case .aesfa, .stytr2: return "Tap a style to use as input"
         }
@@ -345,6 +372,7 @@ struct ContentView: View {
         switch selectedModelFamily {
         case .adain: return availableAdaINStyles
         case .fst: return availableFSTStyles
+        // Use the same list of style inputs for both arbitrary and AdaIN families now
         case .aesfa, .stytr2: return availableArbitraryStyleInputs
         }
     }
@@ -481,28 +509,91 @@ struct ContentView: View {
         selectedStyle = style  // Update selection regardless of family
         userMessage = nil  // Clear previous message
 
-        if selectedModelFamily.isArbitraryStyleFamily {
-            // Load the tapped style as *input data* for the already loaded arbitrary model
-            print("-> Loading style asset '\(style.assetName)' as input.")
-            userMessage = "Loading style input: \(style.name)..."  // Provide feedback
-            styleTransferService.loadStyleImage(named: style.assetName)
-            // Error handling for style loading is done in handleServiceError
+        switch selectedModelFamily {
+        case .adain:
+            // 1. Load the specific AdaIN *model* associated with this style
+            if let modelToLoad = style.associatedModelFilename {
+                print("-> Switching to AdaIN model: '\(modelToLoad)'")
+                userMessage = "Loading \(style.name) (AdaIN) model..."
+                styleTransferService.switchModel(to: modelToLoad)
+                // 2. Style *image* loading will be triggered by onChange(of: isModelLoaded)
+                //    once the model load completes successfully.
+            } else {
+                handleMissingModelError(style: style)
+            }
 
-        } else if selectedModelFamily.isSingleStyleFamily {
+        case .fst:
             // Load the specific single-style *model* associated with this style
             if let modelToLoad = style.associatedModelFilename {
-                print("-> Switching to single-style model: '\(modelToLoad)'")
-                userMessage = "Loading \(style.name) (\(selectedModelFamily.rawValue)) model..."
+                print("-> Switching to FST model: '\(modelToLoad)'")
+                userMessage = "Loading \(style.name) (FST) model..."
                 styleTransferService.switchModel(to: modelToLoad)
             } else {
-                // This shouldn't happen if StyleInfo is set up correctly
-                let errorMsg = "Error: Configuration issue for style \(style.name)."
-                print("🔴 \(errorMsg)")
-                userMessage = errorMsg
-                styleTransferService.error = StyleTransferService.StyleTransferError
-                    .modelFileNotFound("Associated with \(style.name)")
+                handleMissingModelError(style: style)
+            }
+
+        case .aesfa, .stytr2:
+            // Load the tapped style as *input data* for the already loaded arbitrary model
+            print(
+                "-> Loading style asset '\(style.assetName)' as input for \(selectedModelFamily.rawValue)."
+            )
+            userMessage = "Loading style input: \(style.name)..."  // Provide feedback
+            styleTransferService.loadStyleImage(named: style.assetName)
+        // Error handling for style loading is done in handleServiceError
+        }
+    }
+
+    // Helper for missing model error
+    private func handleMissingModelError(style: StyleInfo) {
+        let errorMsg = "Error: Configuration issue - model not defined for style \(style.name)."
+        print("🔴 \(errorMsg)")
+        userMessage = errorMsg
+        styleTransferService.error = StyleTransferService.StyleTransferError
+            .modelFileNotFound("Associated with \(style.name)")
+    }
+
+    // Function to trigger AdaIN style image loading
+    private func triggerAdaINStyleImageLoadIfNeeded(modelIsLoaded: Bool) {
+        // Check conditions: model just loaded, family is AdaIN, a style is selected,
+        // and the loaded model requires style input (is dual-input).
+        guard modelIsLoaded,
+            selectedModelFamily == .adain,
+            let currentSelectedStyle = selectedStyle,
+            styleTransferService.currentModelStructure == .dualInput  // Check the actual loaded model structure
+        else {
+            // Conditions not met, do nothing.
+            // Log why if needed for debugging:
+            // if modelIsLoaded && selectedModelFamily == .adain {
+            //     print("ℹ️ AdaIN style load trigger skipped: selectedStyle=\(selectedStyle != nil), modelStructure=\(styleTransferService.currentModelStructure)")
+            // }
+            return
+        }
+
+        // Check if the style image for this specific style is already loaded or being loaded
+        // Avoid redundant calls if the user taps the same style quickly.
+        // We infer this by checking if an error related to style loading exists for *this* style.
+        // A more robust check might involve tracking the state in StyleTransferService.
+        if let currentError = styleTransferService.error as? StyleTransferService.StyleTransferError
+        {
+            switch currentError {
+            case .styleImageNotFound, .styleImageProcessingFailed, .styleImageNotSet:
+                // If there's already a style error, maybe don't retry automatically,
+                // or only retry if the error is specifically .styleImageNotSet.
+                // For now, let's proceed to allow retrying.
+                print(
+                    "⚠️ Proceeding with AdaIN style image load despite existing style error: \(currentError)"
+                )
+            default:
+                break  // Other errors don't prevent style loading attempt
             }
         }
+
+        // All checks passed, load the style image associated with the selected AdaIN style
+        print(
+            "✅ AdaIN model '\(currentSelectedStyle.associatedModelFilename ?? "N/A")' loaded. Now loading style input asset '\(currentSelectedStyle.assetName)'..."
+        )
+        userMessage = "Loading \(currentSelectedStyle.name) style input..."
+        styleTransferService.loadStyleImage(named: currentSelectedStyle.assetName)
     }
 
     func applyStyle() {
@@ -511,51 +602,57 @@ struct ContentView: View {
             return
         }
 
-        // Use canProcess to simplify the guard, but keep specific messages
+        // Use canProcess to simplify the guard
         guard canProcess else {
             // Provide more specific feedback why it's disabled
             if contentImage == nil {
                 userMessage = "Please select a content image."
             } else if !styleTransferService.isModelLoaded {
-                if selectedModelFamily.isSingleStyleFamily {
-                    userMessage =
-                        "Please select a \(selectedModelFamily.rawValue) style to load the model."
-                } else {
-                    userMessage =
-                        "\(selectedModelFamily.rawValue) model is not loaded or failed to load."
-                }
+                userMessage = "Model is not loaded. Please select a style/family."
             } else if selectedStyle == nil {
-                if selectedModelFamily.isArbitraryStyleFamily {
-                    userMessage =
-                        "Please select a style input for the \(selectedModelFamily.rawValue) model."
-                } else {
-                    userMessage = "Please select a \(selectedModelFamily.rawValue) style."
-                }
-            } else if (selectedModelFamily.isArbitraryStyleFamily
-                && styleTransferService.isSingleInputModel)
-                || (selectedModelFamily.isSingleStyleFamily
-                    && !styleTransferService.isSingleInputModel)
+                userMessage = "Please select a style."
+            } else if selectedModelFamily.requiresStyleImageInput
+                && !styleInputRequirementMetInCanProcess()
             {
+                // Check the specific style input requirement again for a clearer message
                 userMessage =
-                    "Error: Loaded model type doesn't match selected family. Please re-select style/family."
-                print(
-                    "🔴 Mismatch: Family=\(selectedModelFamily.rawValue), isSingleInputModel=\(styleTransferService.isSingleInputModel)"
-                )
+                    "Style input required for \(selectedModelFamily.rawValue) is missing or failed to load."
+                print("🔴 Apply blocked: Style input requirement not met.")
             } else if styleTransferService.isProcessing {
-                userMessage = "Already processing..."  // Should be handled by button state, but good fallback
+                userMessage = "Already processing..."  // Should be handled by button state
             } else {
-                userMessage = "Cannot apply style. Check selections."  // Generic fallback
+                userMessage = "Cannot apply style. Check selections and wait for loading."  // Generic fallback
             }
+            print("🚫 Apply Style blocked. canProcess = false.")
             return
         }
 
         // If all checks pass
         print(
-            "🚀 Triggering style transfer. Family: \(selectedModelFamily.rawValue), Style: \(selectedStyle!.name), Model Loaded: \(styleTransferService.isModelLoaded), Is Single Input: \(styleTransferService.isSingleInputModel)"
+            "🚀 Triggering style transfer. Family: \(selectedModelFamily.rawValue), Style: \(selectedStyle!.name), Model Loaded: \(styleTransferService.isModelLoaded), Requires Style Input: \(selectedModelFamily.requiresStyleImageInput)"
         )
         // Set processing message *before* calling process
         userMessage = "Processing..."
         styleTransferService.process(contentImage: content)
+    }
+
+    // Helper function mirroring the logic within canProcess for style input check
+    private func styleInputRequirementMetInCanProcess() -> Bool {
+        if selectedModelFamily.requiresStyleImageInput && styleTransferService.isModelLoaded {
+            if let currentError = styleTransferService.error
+                as? StyleTransferService.StyleTransferError
+            {
+                switch currentError {
+                case .styleImageNotFound, .styleImageProcessingFailed, .styleImageNotSet:
+                    return false
+                default:
+                    return true
+                }
+            } else {
+                return true
+            }
+        }
+        return true  // Not required or model not loaded yet
     }
 
     func handlePhotoSelection(newItem: PhotosPickerItem?) {
@@ -563,7 +660,6 @@ struct ContentView: View {
         resultImage = nil
 
         // Set loading message immediately
-        // Use a temporary flag to ensure message is set only once per selection attempt
         var isLoadingSet = false
         if newItem != nil {
             userMessage = "Loading content image..."
@@ -628,23 +724,38 @@ struct ContentView: View {
         let styleName = selectedStyle?.name  // Get name if a style triggered the load
 
         // Only update message if a loading operation was likely in progress
-        let wasLoading =
-            userMessage?.lowercased().contains("loading") ?? false
-            || userMessage?.lowercased().contains("switching") ?? false
+        let wasLoadingModel =
+            userMessage?.lowercased().contains("loading \(styleName ?? familyName)") ?? false
+        let wasSwitchingFamily =
+            userMessage?.lowercased().contains("switching to \(familyName)") ?? false
+        let wasLoading = wasLoadingModel || wasSwitchingFamily
 
         if loaded {
             if wasLoading {
+                // Determine if it's single or dual input based on the *service's* detection
                 let modelType =
-                    styleTransferService.isSingleInputModel ? "(Single-Style)" : "(Arbitrary)"
+                    styleTransferService.currentModelStructure == .singleInput
+                    ? "(Single-Input)" : "(Dual-Input)"
                 let specificName = styleName ?? familyName  // Use style name if available, else family name
-                let successMsg = "'\(specificName)' \(modelType) loaded successfully."
-                userMessage = successMsg
-                print("✅ \(successMsg)")
-                // Optionally clear the message after a delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    if userMessage == successMsg {
-                        userMessage = nil
+                var successMsg = "'\(specificName)' \(modelType) model loaded."
+
+                // If it's AdaIN, the style input loading starts next (handled by triggerAdaINStyleImageLoadIfNeeded)
+                // Avoid clearing the message immediately for AdaIN.
+                let isAdaINLoad = selectedModelFamily == .adain && styleName != nil
+
+                if !isAdaINLoad {
+                    userMessage = successMsg + " Ready."
+                    print("✅ \(successMsg)")
+                    // Optionally clear the message after a delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        if userMessage == successMsg + " Ready." {
+                            userMessage = nil
+                        }
                     }
+                } else {
+                    // For AdaIN, just confirm model load, next step is style input load
+                    userMessage = successMsg  // Message will be updated again by triggerAdaIN...
+                    print("✅ \(successMsg) - Awaiting style input load.")
                 }
             }
             // If an arbitrary model loaded successfully after selecting the family, prompt for style input
@@ -660,8 +771,9 @@ struct ContentView: View {
         } else {
             // Model is not loaded.
             // If it was loading, an error likely occurred (handled by handleServiceError).
-            // If it was reset intentionally (e.g., switching to AdaIN/FST family), the message should be the prompt.
+            // If it was reset intentionally (e.g., switching to FST family), the message should be the prompt.
             if styleTransferService.error == nil {
+                // If switching *to* a family that requires selection (FST, AdaIN)
                 if selectedModelFamily.isSingleStyleFamily {
                     // Ensure the prompt is set if no error and model unloaded
                     if userMessage != styleSectionPrompt {
@@ -678,45 +790,63 @@ struct ContentView: View {
     func handleServiceError(error: Error?) {
         if let error = error {
             let description = error.localizedDescription
-            // Don't show the generic "Loading..." message if a real error occurred
-            if let styleError = error as? StyleTransferService.StyleTransferError,
-                styleError == .modelLoading
-            {
-                // Keep the specific "Loading..." or "Switching..." message if it's already set by handleStyleTap/handleModelFamilyChange
-                if !(userMessage?.lowercased().contains("loading \(selectedStyle?.name ?? "")")
-                    ?? false
-                    || userMessage?.lowercased().contains(
-                        "switching to \(selectedModelFamily.rawValue)") ?? false)
-                {
-                    // Only set generic loading if a specific one isn't present
-                    if userMessage != description { userMessage = description }
+            var displayMessage = "Error: \(description)"
+
+            if let styleError = error as? StyleTransferService.StyleTransferError {
+                switch styleError {
+                case .modelLoading:
+                    // Keep specific loading messages if already set
+                    if !(userMessage?.lowercased().contains("loading") ?? false
+                        || userMessage?.lowercased().contains("switching") ?? false)
+                    {
+                        displayMessage = description  // Use the "Loading selected model..." message
+                    } else {
+                        displayMessage = userMessage ?? description  // Keep existing specific message
+                    }
+                case .modelFileNotFound(let name) where name.isEmpty:
+                    // Model unloaded intentionally (e.g., reset), don't show as error
+                    print("ℹ️ Model unloaded or cleared.")
+                    // Keep the prompt message set by handleModelFamilyChange or handleModelLoadingStatus
+                    displayMessage = userMessage ?? ""  // Avoid overwriting prompt
+                    if displayMessage.isEmpty { return }  // Don't display empty message
+
+                // NEW: Handle style loading errors more gracefully
+                case .styleImageNotFound, .styleImageProcessingFailed, .styleImageNotSet:
+                    // These errors occur *after* model load for AdaIN/Arbitrary.
+                    // Display the error, but don't clear selectedStyle.
+                    displayMessage = "Style Input Error: \(description)"
+                    print("🔴 \(displayMessage)")
+
+                default:
+                    // Use default "Error: description"
+                    print("🔴 Service Error Received: \(description)")
                 }
+            } else {
+                // Non-StyleTransferError
+                print("🔴 Service Error Received (Non-StyleTransferError): \(description)")
             }
-            // Handle case where resetService might trigger modelFileNotFound("")
-            else if let styleError = error as? StyleTransferService.StyleTransferError,
-                case .modelFileNotFound(let name) = styleError, name.isEmpty
-            {
-                print("ℹ️ Model unloaded or cleared by resetService.")
-                // Message should have been set by the action triggering resetService (e.g., family change prompt).
-                // Avoid overwriting the prompt.
+
+            // Update message only if it's different to avoid redundant UI updates/flicker
+            if userMessage != displayMessage {
+                userMessage = displayMessage
             }
-            // For all other errors, display the description
-            else {
-                // Update message only if it's different to avoid redundant UI updates
-                if userMessage != "Error: \(description)" {
-                    userMessage = "Error: \(description)"
-                }
-                print("🔴 Service Error Received: \(description)")
-            }
+
         } else {
             // Error is nil. Clear the message *only if* it was previously an error message
-            // or a transient loading message that wasn't cleared by success.
+            // or a transient loading/processing message that wasn't cleared by success.
             if let msg = userMessage,
                 messageColor(msg) == .red || msg.lowercased().contains("loading")
                     || msg.lowercased().contains("processing")
                     || msg.lowercased().contains("switching")
             {
-                userMessage = nil
+                // Check if it's the AdaIN model loaded message, waiting for style input
+                let isAdaINModelLoadedMsg = msg.contains("model loaded.") && msg.contains("AdaIN")
+                if !isAdaINModelLoadedMsg {
+                    userMessage = nil  // Clear the message
+                } else {
+                    // Keep the "AdaIN model loaded" message until style input loads or fails
+                    print("ℹ️ Keeping AdaIN model loaded message while waiting for style input.")
+                }
             }
             // Don't clear prompts like "Tap a style..."
         }
@@ -733,10 +863,11 @@ struct ContentView: View {
         } else {
             // Processing finished.
             // If the message is still "Processing...", it means neither success (handleStyledImageUpdate)
-            // nor failure (handleServiceError) updated the message. This indicates an unexpected state.
+            // nor failure (handleServiceError) updated the message. This indicates an unexpected state
+            // or simply that processing finished without error but produced no image (less likely).
             if userMessage == "Processing..." {
                 if styleTransferService.error == nil && resultImage == nil {
-                    userMessage = "Processing finished unexpectedly."  // Or clear: userMessage = nil
+                    userMessage = "Processing finished."  // Clearer than "unexpectedly"
                     print("⚠️ Processing finished but no result or error was reported.")
                 }
                 // If error is not nil, handleServiceError should have updated the message.
@@ -744,8 +875,6 @@ struct ContentView: View {
             }
         }
     }
-
-    // MARK: - Save Image Function
 
     func saveImage(image: Image) {  // `image` here is the SwiftUI Image from resultImage
         // Ensure coordinator is available

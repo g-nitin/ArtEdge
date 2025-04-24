@@ -36,7 +36,7 @@ class StyleTransferService: ObservableObject {
         case singleInput
         case dualInput
     }
-    private var currentModelStructure: ModelStructureType = .unknown
+    var currentModelStructure: ModelStructureType = .unknown
 
     // Output Type Tracking
     enum ModelOutputType {
