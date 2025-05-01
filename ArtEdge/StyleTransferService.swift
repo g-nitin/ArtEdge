@@ -779,28 +779,34 @@ class StyleTransferService: ObservableObject {
                 let modelOutputPointSize = finalUIImage.size
                 print("ℹ️ Model direct output size (points): \(modelOutputPointSize)")
 
-                // Compare model output size with original content size (allow small tolerance)
-                let widthDifference = abs(
-                    originalContentPointSize.width - modelOutputPointSize.width)
-                let heightDifference = abs(
-                    originalContentPointSize.height - modelOutputPointSize.height)
+                // --- START MODIFICATION ---
 
+                // Define the desired fixed output size
+                let fixedOutputSize = CGSize(width: 256, height: 256)
+
+                // Always attempt to resize to the fixed size, unless it's already very close
+                let widthDifference = abs(fixedOutputSize.width - modelOutputPointSize.width)
+                let heightDifference = abs(fixedOutputSize.height - modelOutputPointSize.height)
+
+                // Resize if not already the target size (allow small tolerance)
                 if widthDifference > 1 || heightDifference > 1 {
                     print(
-                        "ℹ️ Resizing model output (\(modelOutputPointSize)) back to original content size (\(originalContentPointSize))..."
+                        "ℹ️ Resizing model output (\(modelOutputPointSize)) to fixed size (\(fixedOutputSize))..."
                     )
                     // Use the existing resize extension which takes point size
-                    if let resizedOutput = finalUIImage.resize(to: originalContentPointSize) {
+                    if let resizedOutput = finalUIImage.resize(to: fixedOutputSize) {  // <<< USE fixedOutputSize HERE
                         finalUIImage = resizedOutput  // Update finalUIImage with the resized version
                         print("✅ Resized output image successfully to \(finalUIImage.size).")
                     } else {
                         print(
-                            "⚠️ Warning: Failed to resize output image back to original size. Using model output size."
+                            "⚠️ Warning: Failed to resize output image to fixed size. Using model output size."
                         )
                         // Keep finalUIImage as is (the model's output size)
                     }
                 } else {
-                    print("ℹ️ Model output size matches original content size. No resizing needed.")
+                    print(
+                        "ℹ️ Model output size already matches fixed target size. No resizing needed."
+                    )
                 }
 
                 // --- Update UI (Common logic) ---

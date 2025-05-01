@@ -35,16 +35,6 @@
 			path = ArtEdge;
 			sourceTree = "<group>";
 		};
-		F697685C2DB433010023C144 /* ArtEdgeTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = ArtEdgeTests;
-			sourceTree = "<group>";
-		};
-		F69768662DB433010023C144 /* ArtEdgeUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = ArtEdgeUITests;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -76,8 +66,6 @@
 			isa = PBXGroup;
 			children = (
 				F697684E2DB432FE0023C144 /* ArtEdge */,
-				F697685C2DB433010023C144 /* ArtEdgeTests */,
-				F69768662DB433010023C144 /* ArtEdgeUITests */,
 				F697684D2DB432FE0023C144 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -130,9 +118,6 @@
 			dependencies = (
 				F697685B2DB433010023C144 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				F697685C2DB433010023C144 /* ArtEdgeTests */,
-			);
 			name = ArtEdgeTests;
 			packageProductDependencies = (
 			);
@@ -152,9 +137,6 @@
 			);
 			dependencies = (
 				F69768652DB433010023C144 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				F69768662DB433010023C144 /* ArtEdgeUITests */,
 			);
 			name = ArtEdgeUITests;
 			packageProductDependencies = (
