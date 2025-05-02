@@ -1,0 +1,11 @@
+**/*.pyc
+**/*.DS_Store
+**/*__pycache__
+
+**/models/StyTR-2/experiments/embedding_iter_160000.pth
+**/models/StyTR-2/experiments/vgg_normalised.pth
+**/models/StyTR-2/experiments/decoder_iter_160000 (1).pth
+**/models/StyTR-2/experiments/transformer_iter_160000.pth
+**/StyTR-2/experiments/stytr2_scripted.pt
+**/models/AesFA/models/vgg_normalized.pth
+**/models/AesFA/models/main.pth
