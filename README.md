@@ -5,7 +5,7 @@
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repo-blue?logo=github)](https://github.com/g-nitin/ArtEdge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This repository contains the source code, models, and supplementary materials for the **ArtEdge** project, as detailed in our research paper: "_ArtEdge: Real-Time Neural Style Transfer for Mobile Devices_" by Nayeem Mohammad and Nitin Gupta, University of South Carolina.
+This repository contains the source code, models, and supplementary materials for the **ArtEdge** project, as detailed in our report: [_ArtEdge: Real-Time Neural Style Transfer for Mobile Devices_](misc/ArtEdge.pdf).
 
 ArtEdge is a mobile-first iOS application demonstrating the feasibility of performing Neural Style Transfer (NST) directly on-device using edge computing principles. By eliminating the need for cloud processing, ArtEdge achieves low latency inference suitable for real-time applications while enhancing user privacy by keeping images local to the device.
 
@@ -139,7 +139,7 @@ This project is licensed under the MIT License - see the `LICENSE` file for deta
 
 ## Contact
 
-- Nayeem Mohammad - `nayeem@email.sc.edu`
 - Nitin Gupta - `niting@email.sc.edu`
+- Nayeem Mohammad - `nayeem@email.sc.edu`
 
 Department of Computer Science and Engineering, University of South Carolina.

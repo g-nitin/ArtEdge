@@ -14,6 +14,8 @@ class StyleTransferService: ObservableObject {
     @Published var isModelLoaded: Bool = false
     @Published var isProcessing: Bool = false  // Track processing state
     @Published var isSingleInputModel: Bool = false  // Track if the loaded model is single-input
+    @Published var isStyleInputModel: Bool = false  // Track if the loaded model is single-input
+    @Published var isStyleInputDataLoaded: Bool = false  // NEW: Tracks if style input image data is loaded
 
     private var mlModel: MLModel?
     // Store the dynamically determined names
@@ -56,7 +58,7 @@ class StyleTransferService: ObservableObject {
     // Style data (only relevant for dual-input models)
     private var styleMultiArray: MLMultiArray?
     private var stylePixelBuffer: CVPixelBuffer?
-    private var currentStyleName: String?  // Tracks the asset name of the loaded style *input*
+    var currentStyleName: String?  // Tracks the asset name of the loaded style *input*
 
     // Shared CIContext for CVPixelBuffer to UIImage conversion
     private let ciContext = CIContext()
@@ -408,6 +410,7 @@ class StyleTransferService: ObservableObject {
                     self.styleMultiArray = nil
                     self.stylePixelBuffer = nil
                     self.currentStyleName = nil
+                    self.isStyleInputDataLoaded = false
                     print("ℹ️ Cleared style input data as loaded model is single-input.")
                 }
             }
@@ -435,7 +438,8 @@ class StyleTransferService: ObservableObject {
         // Don't reset isModelLoaded or error here, let the calling function manage UI state
         // Reset isSingleInputModel on main thread for UI updates
         DispatchQueue.main.async {
-            self.isSingleInputModel = false  // Reset this flag
+            self.isSingleInputModel = false
+            self.isStyleInputDataLoaded = false
         }
         // Clear style data too
         self.styleMultiArray = nil
@@ -457,28 +461,17 @@ class StyleTransferService: ObservableObject {
                 {
                     self.error = nil
                 }
-            }
-            return
-        }
-
-        // Check if already loaded
-        guard imageName != currentStyleName else {
-            print("ℹ️ Style input '\(imageName)' is already loaded.")
-            // Clear potential "style not set" error if this style is re-selected
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                if let currentError = self.error as? StyleTransferError,
-                    currentError == .styleImageNotSet
-                {
-                    self.error = nil
-                }
+                self.isStyleInputDataLoaded = false
             }
             return
         }
 
         guard let requiredSize = self.modelInputSize else {
             print("🔴 Error loading style input: Model input size not determined yet.")
-            DispatchQueue.main.async { self.error = StyleTransferError.modelNotLoaded }
+            DispatchQueue.main.async {
+                self.error = StyleTransferError.modelNotLoaded
+                self.isStyleInputDataLoaded = false
+            }
             return
         }
 
@@ -492,6 +485,7 @@ class StyleTransferService: ObservableObject {
                 self?.styleMultiArray = nil
                 self?.stylePixelBuffer = nil
                 self?.currentStyleName = nil
+                self?.isStyleInputDataLoaded = false
             }
             return
         }
@@ -506,6 +500,7 @@ class StyleTransferService: ObservableObject {
                 self?.styleMultiArray = nil
                 self?.stylePixelBuffer = nil
                 self?.currentStyleName = nil
+                self?.isStyleInputDataLoaded = false
             }
             return
         }
@@ -529,6 +524,7 @@ class StyleTransferService: ObservableObject {
                     self?.styleMultiArray = nil
                     self?.stylePixelBuffer = nil  // Also clear buffer if conversion failed
                     self?.currentStyleName = nil
+                    self?.isStyleInputDataLoaded = false
                 }
                 return  // Stop processing this style load
             }
@@ -540,14 +536,33 @@ class StyleTransferService: ObservableObject {
             )
         }
 
-        // Update state
-        self.currentStyleName = imageName
+        // Determine if load was truly successful based on expected types and populated buffers
+        let successfulLoad =
+            (self.expectedInputType == .image && self.stylePixelBuffer != nil)
+            || (self.expectedInputType == .multiArray && self.styleMultiArray != nil
+                && self.stylePixelBuffer != nil)
+
+        self.currentStyleName = successfulLoad ? imageName : nil  // Only set name if fully successful
         DispatchQueue.main.async { [weak self] in
-            // Clear "style not set" error now that one is loaded
-            if let currentError = self?.error as? StyleTransferError,
-                currentError == .styleImageNotSet
-            {
-                self?.error = nil
+            guard let self = self else { return }
+            self.isStyleInputDataLoaded = successfulLoad  // <<< SET BASED ON SUCCESS
+
+            if successfulLoad {
+                // Clear "style not set" error now that one is loaded and successful
+                if let currentError = self.error as? StyleTransferError,
+                    currentError == .styleImageNotSet
+                {
+                    self.error = nil
+                }
+                // If no error was present, ensure error remains nil.
+                // If some other error unrelated to style input was present, leave it.
+            } else {
+                // If not successfulLoad but we reached here, it means one of the buffers might be nil unexpectedly
+                // or an error wasn't set properly. Ensure isStyleInputDataLoaded is false.
+                // And if no error is currently set, set a generic one.
+                if self.error == nil {
+                    self.error = StyleTransferError.styleImageProcessingFailed
+                }
             }
         }
     }
@@ -779,8 +794,6 @@ class StyleTransferService: ObservableObject {
                 let modelOutputPointSize = finalUIImage.size
                 print("ℹ️ Model direct output size (points): \(modelOutputPointSize)")
 
-                // --- START MODIFICATION ---
-
                 // Define the desired fixed output size
                 let fixedOutputSize = CGSize(width: 256, height: 256)
 
@@ -809,7 +822,7 @@ class StyleTransferService: ObservableObject {
                     )
                 }
 
-                // --- Update UI (Common logic) ---
+                // Update UI (Common logic) **
                 let endTime = Date()
                 let timeInterval = endTime.timeIntervalSince(startTime) * 1000
 
@@ -1142,7 +1155,7 @@ class StyleTransferService: ObservableObject {
         let bytesPerRow = width * bytesPerPixel
         var pixelData = [UInt8](repeating: 0, count: height * bytesPerRow)
 
-        print("--- Debug Pixel Values (Denormalized Float 0-1) ---")
+        print("** Debug Pixel Values (Denormalized Float 0-1) **")
         logPixelValue(
             x: 0, y: 0, width: width, height: height, channels: channels, dataPointer: dataPointer,
             std: std, mean: mean, shape: multiArray.shape)  // Top-Left
@@ -1158,7 +1171,7 @@ class StyleTransferService: ObservableObject {
         logPixelValue(
             x: width / 2, y: height / 2, width: width, height: height, channels: channels,
             dataPointer: dataPointer, std: std, mean: mean, shape: multiArray.shape)  // Center
-        print("----------------------------------------------------")
+        print("**********************************-")
 
         // Image Creation Loop
         for y in 0..<height {

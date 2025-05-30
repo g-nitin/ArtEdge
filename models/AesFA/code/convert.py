@@ -139,14 +139,14 @@ try:
     coreml_model.save(OUTPUT_COREML_PATH)
     print("✅ Core ML model saved successfully.")
 
-    print("\n--- Inspecting Saved Core ML Model ---")
+    print("\n*** Inspecting Saved Core ML Model ***")
     # Load the saved model
     saved_mlmodel = ct.models.MLModel(OUTPUT_COREML_PATH)
     spec = saved_mlmodel.get_spec()
     print("Model Output Descriptions:")
     for output in spec.description.output:
         print(f"  Name: {output.name}, Type: {output.type}")
-    print("---------------------------------")
+    print("*********************************")
 
 except Exception as e:
     print(f"🔴 Core ML conversion failed: {e}")

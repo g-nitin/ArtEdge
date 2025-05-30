@@ -232,7 +232,7 @@ try:
     print("✅ Wrapped Core ML model saved successfully.")
 
     # Inspect saved model details
-    print("\n--- Inspecting Saved Wrapped Core ML Model ---")
+    print("\n*** Inspecting Saved Wrapped Core ML Model ***")
     saved_mlmodel = ct.models.MLModel(output_coreml_path)
     spec_saved = saved_mlmodel.get_spec()
     print("Model Input Descriptions from Spec:")
@@ -245,7 +245,7 @@ try:
         print(
             f"  Name: {outp.name}, Type: {outp.type.WhichOneof('Type')}, Shape: {outp.type.multiArrayType.shape if outp.type.WhichOneof('Type') == 'multiArrayType' else 'N/A'}"
         )
-    print("---------------------------------")
+    print("*********************************")
 
 
 except Exception as e:

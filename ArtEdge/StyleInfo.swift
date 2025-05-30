@@ -33,9 +33,9 @@ struct StyleInfo: Identifiable, Hashable {
 
 // Styles that load specific AdaIN models
 let availableAdaINStyles: [StyleInfo] = [
-    StyleInfo(name: "Brushstrokes", assetName: "brushstrokes", modelFilename: "AdaIN-Brushstrokes"),
-    StyleInfo(name: "Mondrian", assetName: "mondrian", modelFilename: "AdaIN-Mondrian"),
-    StyleInfo(name: "Starry Night", assetName: "starry_night", modelFilename: "AdaIN-Starry"),
+    StyleInfo(name: "Brushstrokes", assetName: "brushstrokes", modelFilename: "AdaIN-brushstrokes"),
+    StyleInfo(name: "Mondrian", assetName: "mondrian", modelFilename: "AdaIN-mondrian"),
+    StyleInfo(name: "Starry Night", assetName: "starry_night", modelFilename: "AdaIN-starry"),
 ]
 
 // Styles that load specific FST models

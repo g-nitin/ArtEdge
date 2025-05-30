@@ -13,10 +13,11 @@ CONTENT_SIZE = 256
 
 # Select the specific pretrained FST model to convert
 ROOT = os.path.dirname(os.path.abspath(__file__))  # Get the directory of this script
-MODEL_NAME = "starry_night"
+# MODEL_NAME = "starry_night"
 # MODEL_NAME = "rain_princess"
 # MODEL_NAME = "abstract"
 # MODEL_NAME = "mosaic"
+MODEL_NAME = "mondrian"
 CHECKPOINT_PATH = os.path.join(
     ROOT, "models", f"{MODEL_NAME}_pretrained.pth"
 )  # Path to the pretrained model checkpoint
@@ -186,7 +187,7 @@ try:
 
     except Exception as e:
         print(f"🔴 Error inspecting saved model: {e}")
-    print("---------------------------------")
+    print("*********************************")
 
 
 except Exception as e:

@@ -166,7 +166,7 @@ try:
     print("✅ Core ML model saved successfully.")
 
     # Inspect Saved Model (Optional)
-    print("\n--- Inspecting Saved Core ML Model")
+    print("\n*** Inspecting Saved Core ML Model")
     try:
         saved_mlmodel = ct.models.MLModel(OUTPUT_COREML_PATH)
         spec = saved_mlmodel.get_spec()
@@ -197,7 +197,7 @@ try:
             print(
                 f"  Description: {saved_mlmodel.output_description[output_desc.name]}"
             )
-        print("---------------------------------")
+        print("*********************************")
     except Exception as e_inspect:
         print(f"Warning: Could not inspect the saved model: {e_inspect}")
 

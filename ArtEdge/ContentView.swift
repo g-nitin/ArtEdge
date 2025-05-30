@@ -231,6 +231,9 @@ struct ContentView: View {
         .onReceive(styleTransferService.$isProcessing) { processing in
             handleProcessingStatus(processing: processing)
         }
+        .onReceive(styleTransferService.$isStyleInputDataLoaded) { isDataLoaded in
+            handleStyleInputDataLoaded(isDataLoaded)
+        }
         .fullScreenCover(isPresented: $showCameraPicker) {
             ImagePicker(image: $contentImage, isPresented: $showCameraPicker, sourceType: .camera)
         }
@@ -507,17 +510,19 @@ struct ContentView: View {
             "ContentView: Tapped style '\(style.name)' for family '\(selectedModelFamily.rawValue)'"
         )
         selectedStyle = style  // Update selection regardless of family
-        userMessage = nil  // Clear previous message
 
         switch selectedModelFamily {
         case .adain:
             // 1. Load the specific AdaIN *model* associated with this style
             if let modelToLoad = style.associatedModelFilename {
                 print("-> Switching to AdaIN model: '\(modelToLoad)'")
+                // Clear previous general message before setting specific loading message
+                if userMessage != nil && !(userMessage?.lowercased().contains("error") ?? false) {
+                    userMessage = nil
+                }
                 userMessage = "Loading \(style.name) (AdaIN) model..."
                 styleTransferService.switchModel(to: modelToLoad)
-                // 2. Style *image* loading will be triggered by onChange(of: isModelLoaded)
-                //    once the model load completes successfully.
+                // 2. Style *image* loading will be triggered by onChange(of: isModelLoaded) once the model load completes successfully.
             } else {
                 handleMissingModelError(style: style)
             }
@@ -526,6 +531,9 @@ struct ContentView: View {
             // Load the specific single-style *model* associated with this style
             if let modelToLoad = style.associatedModelFilename {
                 print("-> Switching to FST model: '\(modelToLoad)'")
+                if userMessage != nil && !(userMessage?.lowercased().contains("error") ?? false) {
+                    userMessage = nil
+                }
                 userMessage = "Loading \(style.name) (FST) model..."
                 styleTransferService.switchModel(to: modelToLoad)
             } else {
@@ -533,13 +541,34 @@ struct ContentView: View {
             }
 
         case .aesfa, .stytr2:
-            // Load the tapped style as *input data* for the already loaded arbitrary model
+            // Check if this style's asset is already the current one in the service AND its data is loaded
+            if styleTransferService.currentStyleName == style.assetName
+                && styleTransferService.isStyleInputDataLoaded
+            {
+                print("-> Style '\(style.name)' (\(style.assetName)) is already loaded and active.")
+
+                let activeMessage = "Style '\(style.name)' is active."
+                if userMessage != activeMessage {  // Avoid redundant sets
+                    userMessage = activeMessage
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    if self.userMessage == activeMessage {
+                        self.userMessage = nil
+                    }
+                }
+                return  // Exit: Don't re-issue load command
+            }
+
+            // If not already loaded, proceed to load
             print(
-                "-> Loading style asset '\(style.assetName)' as input for \(selectedModelFamily.rawValue)."
+                "-> Attempting to load style asset '\(style.assetName)' as input for \(selectedModelFamily.rawValue)."
             )
-            userMessage = "Loading style input: \(style.name)..."  // Provide feedback
+            if userMessage != nil && !(userMessage?.lowercased().contains("error") ?? false) {
+                userMessage = nil
+            }
+            userMessage = "Loading style input: \(style.name)..."
             styleTransferService.loadStyleImage(named: style.assetName)
-        // Error handling for style loading is done in handleServiceError
         }
     }
 
@@ -594,6 +623,49 @@ struct ContentView: View {
         )
         userMessage = "Loading \(currentSelectedStyle.name) style input..."
         styleTransferService.loadStyleImage(named: currentSelectedStyle.assetName)
+    }
+
+    // Handler for isStyleInputDataLoaded changes
+    private func handleStyleInputDataLoaded(_ isDataLoaded: Bool) {
+        // Try to get the display name of the style that the service reports as current
+        // Note: styleTransferService.currentStyleName is the asset name
+        let serviceAssetName = styleTransferService.currentStyleName
+
+        // Find the StyleInfo corresponding to the service's current asset name
+        // This covers both arbitrary style inputs and AdaIN style inputs.
+        let activeStyleInfo =
+            (availableArbitraryStyleInputs.first { $0.assetName == serviceAssetName }
+                ?? availableAdaINStyles.first { $0.assetName == serviceAssetName })
+
+        if isDataLoaded, let style = activeStyleInfo {
+            // Check if the userMessage was for loading *this specific* style
+            let loadingArbitraryMsg = "Loading style input: \(style.name)..."
+            let loadingAdaINMsg = "Loading \(style.name) style input..."  // Used by triggerAdaINStyleImageLoadIfNeeded
+
+            if userMessage == loadingArbitraryMsg || userMessage == loadingAdaINMsg {
+                let successMsg = "Style input '\(style.name)' loaded."
+                userMessage = successMsg
+                print("✅ \(successMsg)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    if self.userMessage == successMsg {
+                        self.userMessage = nil
+                    }
+                }
+            }
+        } else if !isDataLoaded {
+            // Style input data became unloaded (e.g., model switched to single-input, or load failed implicitly)
+            // If a "Style input 'X' loaded." message is showing, clear it,
+            // but only if there isn't a superseding error message.
+            if let msg = userMessage, msg.contains("Style input") && msg.contains("loaded."),
+                styleTransferService.error == nil
+            {  // Only clear if no active error
+                userMessage = nil
+            }
+            // If a "Loading style input..." message was showing and isDataLoaded became false,
+            // it implies a failure. handleServiceError should ideally pick up the error message.
+            // If it doesn't (e.g. error was set then cleared, but isDataLoaded remains false),
+            // this branch might need to be more robust. For now, assume error handling path is primary for failures.
+        }
     }
 
     func applyStyle() {
@@ -885,7 +957,7 @@ struct ContentView: View {
         }
 
         if #available(iOS 16.0, *) {
-            // --- Main Thread ---
+            // *** Main Thread ***
             // 1. Set initial user message
             userMessage = "Rendering image for saving..."
             print("ℹ️ Preparing ImageRenderer and rendering UIImage on main thread...")
@@ -902,7 +974,7 @@ struct ContentView: View {
                 return  // Exit if rendering fails
             }
 
-            // --- Saving ---
+            // *** Saving ***
             // 4. Call UIImageWriteToSavedPhotosAlbum.
             //    This function handles its own background processing for I/O.
             //    Our callback (`ContentViewCoordinator.image(...)`) ensures UI updates
